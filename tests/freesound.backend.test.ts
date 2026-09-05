@@ -277,7 +277,8 @@ describe('preview + original quality', () => {
     expect(fetched.bytes).toBe(4);
     expect(fetched.mime).toBe('audio/mpeg');
     expect(calls.some((c) => c === freesoundPreviewUrl('777'))).toBe(true);
-    expect(calls.every((c) => !c.includes('freesound.org'))).toBe(true);
+    // every call stays on the app's own origin — no direct freesound.org request
+    expect(calls.every((c) => new URL(c, 'http://umbra.test').origin === 'http://umbra.test')).toBe(true);
   });
 
   it('download errors name the real cause (OAuth2) and never fall back silently', async () => {

@@ -189,10 +189,15 @@ def _extra_media_hosts() -> Sequence[str]:
 def key_hint(key: Optional[str]) -> Optional[str]:
     """A non-reversible fingerprint so two runs can be compared safely.
 
-    Never returns any part of the key itself.
+    Never returns any part of the key itself. This is an *identifier*, not a
+    password verifier: nothing is ever recovered from it, it is never stored,
+    and the clear-text key exists only in the process environment — so the
+    "slow hash required for password storage" concern does not apply here
+    (and an expensive KDF would be pointless: the input never leaves memory).
     """
     if not key:
         return None
+    # codeql[py/weak-sensitive-data-hashing] -- identifier fingerprint, not password storage
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return f"sha256:{digest}"
 

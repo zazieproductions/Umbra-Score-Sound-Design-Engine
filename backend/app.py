@@ -77,9 +77,11 @@ async def lifespan(app: FastAPI):
     ready = [s.id for s in registry.statuses() if s.ready]
     log.info("UMBRA backend %s ready — providers online: %s", VERSION, ", ".join(ready) or "none")
     log.info("audio store: %s", store.root)
-    # never log the key itself — only whether one is present
+    # Only ever log WHETHER a key is present. Its value (and any fingerprint
+    # derived from it) is available through /api/integrations/freesound/status,
+    # never in a log line.
     if freesound_integration.configured():
-        log.info("freesound integration: key configured (%s)", freesound_integration.key_hint(freesound_integration.api_key()))
+        log.info("freesound integration: key configured")
     else:
         log.info(
             "freesound integration: NOT configured (set %s in .env to enable retrieval)",
