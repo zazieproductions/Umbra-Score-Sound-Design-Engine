@@ -1,33 +1,24 @@
-# Umbra Score ML Backend Requirements
+# UMBRA local ML backend — core service dependencies.
+#
+# This file installs only what the *service* needs to run, list providers and
+# serve the timeline. Heavy trained-model dependencies are deliberately split
+# into requirements-ace-step.txt / requirements-extras.txt so a developer can
+# bring up the app, see the honest "not installed" states, and add models later.
 
-# Core (always needed)
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pydantic>=2.5.0
-python-multipart>=0.0.6
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.18
+httpx>=0.27.0
 
-# ML Framework
-torch>=2.0.0
-torchaudio>=2.0.0
+# Audio decoding and the real-result contract.
+soundfile>=0.13.1
+numpy>=1.24
 
-# Audio Processing
-soundfile>=0.12.1
-numpy>=1.24.0
+# Model download from official distribution channels.
+huggingface-hub>=0.24.0
 
-# Transformers & Diffusers (for Stable Audio, MMAudio)
-transformers>=4.35.0
-diffusers>=0.25.0
-accelerate>=0.25.0
+# Optional but recommended: ffprobe-based video metadata in analysis/video.py
+# needs the `ffmpeg` binary on PATH, not a Python package.
 
-# CLAP
-# laion-clap  # Install separately: pip install laion-clap
-
-# Scene Detection
-# scenedetect[videoio]>=0.6.0  # Install separately
-# opencv-python>=4.8.0  # Install separately
-
-# Video Processing (requires ffmpeg installed separately)
-# ffmpeg-python>=0.2.0  # Optional
-
-# Optional: Progress bars
-tqdm>=4.66.0
+# Tests
+pytest>=8.0

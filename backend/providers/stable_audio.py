@@ -1,252 +1,192 @@
-"""
-Stable Audio Open Provider
+"""Stable Audio Open provider — text to sound design.
 
-Integrates Stable Audio Open / stable-audio-tools for text-to-audio generation.
+Handles *physical and environmental* sound: rusted ventilation machinery,
+room tone, metal scrape, water, distant traffic. It is deliberately NOT used
+for musical score (that is ACE-Step) and not for precise synthetic elements
+(that is Umbra Procedural).
+
+Note on attribution: Stable Audio Open is Umbra's own independent choice of an
+open text-to-audio model. It is not a claim about any other product's
+internals.
+
+Inference goes through Hugging Face Diffusers' ``StableAudioPipeline`` rather
+than a hand-rolled diffusion loop.
 """
 
-import os
-import uuid
+from __future__ import annotations
+
+import asyncio
+import io
 import logging
-import tempfile
-from pathlib import Path
-from typing import Optional
+import os
+from typing import Any, Dict, List, Optional
 
-from .base import AudioProvider
-from ..schemas.providers import ProviderCapability, DeviceType, ProviderStatus
-from ..schemas.generation import GenerationRequest, GeneratedAudio, GenerationProvider
+from backend.providers.base import (
+    AudioProvider,
+    Capability,
+    GenerationRequest,
+    GenerationResult,
+    ProviderError,
+    ProviderRole,
+    ProviderStatus,
+)
+from backend.services import model_manager
+from backend.services.audio_store import AudioStore, get_audio_store
+from backend.services.device import preferred_device
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger("umbra.stable_audio")
+
+DEFAULT_MODEL = os.environ.get("UMBRA_STABLE_AUDIO_MODEL", "stabilityai/stable-audio-open-1.0")
+CHECKPOINT_DIR_NAME = "stable-audio-open-1.0"
+
+# Stable Audio Open 1.0 generates up to 47 s at 44.1 kHz stereo.
+MAX_DURATION = 47.0
 
 
 class StableAudioProvider(AudioProvider):
-    """
-    Stable Audio Open text-to-audio provider.
-    
-    Uses the stable-audio-tools library for generation.
-    Model: stable-audio-open
-    
-    Capabilities:
-    - TEXT_TO_AUDIO: Generate audio from text prompts
-    - SFX: Sound effects
-    - AMBIENCE: Ambient textures
-    - MUSIC: Musical elements
-    """
-    
-    name = "stable_audio"
-    display_name = "Stable Audio Open"
-    description = "Open-source text-to-audio generation using Stable Audio Open model"
-    capabilities = [
-        ProviderCapability.TEXT_TO_AUDIO,
-        ProviderCapability.SFX,
-        ProviderCapability.AMBIENCE,
-        ProviderCapability.MUSIC,
-    ]
-    
-    # Model configuration
-    MODEL_NAME = "stable-audio-open"
-    MODEL_REPO = "stabilityai/stable-audio-open"
-    
-    def __init__(self):
-        super().__init__()
-        self._device = DeviceType.CPU
-        self._pipeline = None
-        self._model_name = self.MODEL_NAME
-    
-    def _get_model_name(self) -> Optional[str]:
-        return self._model_name
-    
-    def is_installed(self) -> bool:
-        """Check if stable-audio-tools is installed."""
-        try:
-            import stable_audio
-            return True
-        except ImportError:
-            return False
-    
-    async def is_available(self) -> bool:
-        """Check if the provider can generate."""
-        return self.is_installed() and self._loaded
-    
-    def _detect_device(self) -> DeviceType:
-        """Detect the best available device."""
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return DeviceType.CUDA
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                return DeviceType.MPS
-        except (ImportError, AttributeError):
-            pass
-        return DeviceType.CPU
-    
-    async def _load_model(self) -> bool:
-        """Load the Stable Audio Open model."""
-        try:
-            import torch
-            from diffusers import StableAudioPipeline
-            
-            self._device = self._detect_device()
-            logger.info(f"Loading Stable Audio Open on {self._device}")
-            
-            # Load the model
-            device_str = "cuda" if self._device == DeviceType.CUDA else \
-                         "mps" if self._device == DeviceType.MPS else "cpu"
-            
-            self._pipeline = StableAudioPipeline.from_pretrained(
-                self.MODEL_REPO,
-                torch_dtype=torch.float32,
+    id = "stable-audio"
+    label = "Stable Audio Open"
+    blurb = "Text → sound design"
+    role = ProviderRole.SOUND_DESIGN
+    install_hint = "python scripts/setup_models.py --stable-audio"
+
+    def __init__(self, store: Optional[AudioStore] = None):
+        self.store = store or get_audio_store()
+        self._pipe = None
+        self._lock = asyncio.Lock()
+
+    def _local_path(self):
+        p = model_manager.checkpoints_root() / CHECKPOINT_DIR_NAME
+        return p if p.is_dir() and any(p.iterdir()) else None
+
+    def _deps_ok(self) -> bool:
+        return all(model_manager.package_installed(m) for m in ("torch", "diffusers", "soundfile"))
+
+    def status(self) -> ProviderStatus:
+        local = self._local_path()
+        deps = self._deps_ok()
+        ready = bool(local and deps)
+        device = preferred_device()
+
+        notes: List[str] = []
+        if not deps:
+            notes.append("Requires torch + diffusers + soundfile")
+        if not local:
+            notes.append("Weights not downloaded (gated model — accept the licence on Hugging Face)")
+        if ready:
+            notes.append("Handles environmental and physical sound, not musical score")
+            notes.append(f"Maximum generation length {MAX_DURATION:.0f}s")
+
+        return ProviderStatus(
+            id=self.id,
+            label=self.label,
+            blurb=self.blurb,
+            role=self.role,
+            installed=bool(local),
+            ready=ready,
+            capabilities=(
+                [
+                    Capability.SFX_GENERATION,
+                    Capability.DURATION_CONTROL,
+                    Capability.SEED_CONTROL,
+                    Capability.NEGATIVE_DIRECTION,
+                ]
+                if ready
+                else []
+            ),
+            device=device.id if ready else None,
+            device_detail=device.detail if ready else None,
+            model=DEFAULT_MODEL if local else None,
+            available_models=[DEFAULT_MODEL] if local else [],
+            version=model_manager.package_version("diffusers"),
+            size_bytes=model_manager.dir_size(local) if local else None,
+            notes=notes,
+            install_hint=self.install_hint,
+        )
+
+    async def _ensure_pipe(self):
+        if self._pipe is not None:
+            return self._pipe
+        async with self._lock:
+            if self._pipe is not None:
+                return self._pipe
+            local = self._local_path()
+            if local is None:
+                raise ProviderError(
+                    "Stable Audio Open weights are not installed.",
+                    http_status=503,
+                    hint=self.install_hint,
+                )
+
+            def _load():
+                import torch  # type: ignore
+                from diffusers import StableAudioPipeline  # type: ignore
+
+                device = preferred_device().id
+                dtype = torch.float16 if device == "cuda" else torch.float32
+                pipe = StableAudioPipeline.from_pretrained(str(local), torch_dtype=dtype)
+                return pipe.to("cuda" if device == "cuda" else "mps" if device == "mps" else "cpu")
+
+            self._pipe = await asyncio.to_thread(_load)
+            return self._pipe
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        if not request.prompt.strip():
+            raise ProviderError("Stable Audio needs a prompt describing the sound.", http_status=400)
+        pipe = await self._ensure_pipe()
+        duration = max(1.0, min(MAX_DURATION, float(request.duration)))
+        seed = request.seed
+        steps = int(request.advanced.get("inferenceSteps", request.advanced.get("inference_steps", 100)))
+
+        def _run() -> bytes:
+            import numpy as np  # type: ignore
+            import soundfile as sf  # type: ignore
+            import torch  # type: ignore
+
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device="cpu").manual_seed(int(seed))
+            out = pipe(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt or None,
+                num_inference_steps=steps,
+                audio_end_in_s=duration,
+                num_waveforms_per_prompt=1,
+                generator=generator,
             )
-            self._pipeline = self._pipeline.to(device_str)
-            
-            if self._device in (DeviceType.CUDA, DeviceType.MPS):
-                self._pipeline.enable_vae_tiling()
-            
-            self._model_name = self.MODEL_NAME
-            logger.info(f"Stable Audio Open loaded successfully on {self._device}")
-            return True
-            
-        except ImportError as e:
-            logger.error(f"Missing dependencies for Stable Audio: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to load Stable Audio Open: {e}")
-            return False
-    
-    async def _unload_model(self) -> None:
-        """Unload the model from memory."""
-        if self._pipeline is not None:
-            del self._pipeline
-            self._pipeline = None
-        
-        # Clear CUDA cache if applicable
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-    
-    async def generate(
-        self,
-        request: GenerationRequest,
-        output_dir: str,
-    ) -> list[GeneratedAudio]:
-        """
-        Generate audio from text prompt using Stable Audio Open.
-        
-        Args:
-            request: Generation parameters
-            output_dir: Directory to save generated audio
-            
-        Returns:
-            List of GeneratedAudio objects
-        """
-        if not self._loaded or self._pipeline is None:
-            raise RuntimeError("Stable Audio Open model not loaded")
-        
-        import torch
-        import torchaudio
-        import numpy as np
-        
-        results = []
-        num_variants = max(1, request.num_variants)
-        
-        # Ensure output directory exists
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        for i in range(num_variants):
-            try:
-                # Generate seed for this variant
-                seed = request.seed
-                if seed is None:
-                    seed = torch.randint(0, 2**32 - 1, (1,)).item()
-                else:
-                    seed = (seed + i) % (2**32)
-                
-                generator = torch.Generator(
-                    device=str(self._device)
-                ).manual_seed(seed)
-                
-                # Calculate number of steps based on duration
-                # Model is optimized for specific durations
-                steps = min(100, max(20, int(request.duration * 10)))
-                
-                # Generate audio
-                with torch.no_grad():
-                    audio = self._pipeline(
-                        prompt=request.prompt or "",
-                        negative_prompt=request.negative_prompt or "",
-                        num_inference_steps=steps,
-                        audio_length_in_s=request.duration,
-                        guidance_scale=3.5,
-                        generator=generator,
-                    ).audios[0]
-                
-                # Convert to 32-bit float audio
-                audio_float = audio.astype(np.float32)
-                
-                # Create output file
-                result_id = f"sao_{uuid.uuid4().hex[:12]}"
-                filepath = output_path / f"{result_id}.wav"
-                
-                # Normalize if requested
-                if request.normalize:
-                    peak = np.abs(audio_float).max()
-                    if peak > 0:
-                        audio_float = audio_float / peak * 0.95
-                
-                # Save as WAV (48kHz stereo)
-                # Stable Audio outputs mono at model sample rate, upsample to 48kHz
-                audio_tensor = torch.from_numpy(audio_float).unsqueeze(0)
-                if audio_tensor.shape[0] == 1:
-                    # Convert mono to stereo
-                    audio_tensor = torch.cat([audio_tensor, audio_tensor], dim=0)
-                
-                torchaudio.save(
-                    str(filepath),
-                    audio_tensor,
-                    sample_rate=48000,
-                    bits_per_sample=24,
-                )
-                
-                result = GeneratedAudio(
-                    id=result_id,
-                    filepath=str(filepath),
-                    duration=audio_float.shape[-1] / 48000,
-                    sample_rate=48000,
-                    channels=2,
-                    provider=GenerationProvider.STABLE_AUDIO,
-                    model=self._model_name,
-                    prompt=request.prompt,
-                    negative_prompt=request.negative_prompt,
-                    seed=seed,
-                    variant_index=i,
-                    metadata={
-                        "num_variants": num_variants,
-                        "inference_steps": steps,
-                        "guidance_scale": 3.5,
-                    },
-                )
-                results.append(result)
-                
-                logger.info(
-                    f"Stable Audio generated: {result_id} "
-                    f"prompt='{request.prompt[:50]}...' seed={seed}"
-                )
-                
-            except Exception as e:
-                logger.error(f"Generation failed for variant {i}: {e}")
-                # Create error result
-                results.append(GeneratedAudio(
-                    id=f"sao_err_{uuid.uuid4().hex[:8]}",
-                    filepath="",
-                    duration=request.duration,
-                    sample_rate=48000,
-                    channels=2,
-                    provider=GenerationProvider.STABLE_AUDIO,
-                    error=str(e),
-                    status="failed",
-                ))
-        
-        return results
+            audio = out.audios[0].to(torch.float32).cpu().numpy().T  # (frames, channels)
+            audio = np.clip(audio, -1.0, 1.0)
+            buf = io.BytesIO()
+            sf.write(buf, audio, int(pipe.vae.sampling_rate), format="WAV", subtype="PCM_24")
+            return buf.getvalue()
+
+        data = await asyncio.to_thread(_run)
+        metadata: Dict[str, Any] = {
+            "provider": self.id,
+            "model": DEFAULT_MODEL,
+            "prompt": request.prompt,
+            "negativePrompt": request.negative_prompt or None,
+            "seed": seed,
+            "requestedDuration": duration,
+            "inferenceSteps": steps,
+            "sceneId": request.scene_id,
+            "timelineStart": request.timeline_start,
+        }
+        record = self.store.register_bytes(
+            data,
+            provider=self.id,
+            suffix=".wav",
+            metadata=metadata,
+            filename=(request.label or "stable-audio-sfx").replace(" ", "_") + ".wav",
+        )
+        return GenerationResult(
+            audio_id=record.id,
+            url=f"/api/audio/{record.id}",
+            duration=record.duration,
+            sample_rate=record.sample_rate,
+            channels=record.channels,
+            frames=record.frames,
+            bytes=record.bytes,
+            provider=self.id,
+            metadata=record.metadata,
+        )

@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Activity, CheckCircle2, Cpu, Download, Ear, ExternalLink, HardDriveDownload, RefreshCw, Server, SlidersHorizontal, Sparkles, Terminal, Trash2, Waves } from 'lucide-react';
+import { Activity, CheckCircle2, Download, HardDriveDownload, SlidersHorizontal, Sparkles, Terminal, Waves, Wand2 } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import LayerPanel, { Slider } from './LayerPanel';
+import ScoringPanel from './ScoringPanel';
+import ClipInspector from './ClipInspector';
 import { LoudnessMeter } from './Meter';
-import { bytes, db, tc } from '../lib/format';
-import { ROLE_LABELS } from '../lib/library/types';
+import { bytes, tc } from '../lib/format';
 
 const EXPORTS: { label: string; format: string; res: string; scene?: boolean; max?: number }[] = [
   { label: 'Full score master', format: 'WAV 24-bit / 48 kHz', res: 'stereo' },
@@ -12,7 +13,25 @@ const EXPORTS: { label: string; format: string; res: string; scene?: boolean; ma
   { label: 'Trailer cut (60 s)', format: 'WAV 24-bit / 48 kHz', res: 'stereo', max: 60 },
 ];
 
-/* -------------------------------------------- spotting events -------- */
+function Gauge({ label, value, unit = '%', color = '#ff3b5c' }: { label: string; value: number; unit?: string; color?: string }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="eyebrow text-[8px]">{label}</span>
+        <span className="tnum text-[10px] text-ash">
+          {value.toFixed(0)}
+          {unit}
+        </span>
+      </div>
+      <div className="h-[3px] overflow-hidden rounded-full bg-white/[0.08]">
+        <div
+          className="h-full rounded-full transition-[width] duration-700"
+          style={{ width: `${Math.min(100, value)}%`, background: color, boxShadow: `0 0 8px ${color}` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function SpottingRow({ studio }: { studio: Studio }) {
   const scene = studio.activeScene;
@@ -53,152 +72,6 @@ function SpottingRow({ studio }: { studio: Studio }) {
   );
 }
 
-/* ------------------------------------------- clip inspector ---------- */
-
-function ClipInspector({ studio }: { studio: Studio }) {
-  const [altBusy, setAltBusy] = useState(false);
-  const clip = studio.selectedClip;
-  if (!clip) {
-    return (
-      <div className="flex flex-col gap-3">
-        <div className="rounded-lg border border-dashed border-white/10 p-4 text-center">
-          <Waves size={16} className="mx-auto mb-2 text-dim" />
-          <p className="text-[11px] text-dim">No retrieved clip selected.</p>
-          <p className="mt-1 text-[9.5px] leading-relaxed text-dim/70">
-            Click a clip on the timeline, or USE a candidate in the Library view. Everything here is editable: move, trim, fade,
-            gain, pan, process, replace, delete.
-          </p>
-        </div>
-      </div>
-    );
-  }
-  const a = clip.asset;
-  const t = clip.transform;
-  const patch = (p: Partial<typeof clip>) => studio.patchClip(clip.id, p);
-  const patchT = (p: Partial<typeof t>) => patch({ transform: { ...t, ...p } });
-
-  const findAlt = async () => {
-    setAltBusy(true);
-    await studio.findAlternatives(clip.id);
-    setAltBusy(false);
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-        <div className="mb-1 flex items-center gap-2">
-          <span className="tnum chip border-brine/40 text-brine">MATCH {Math.round(clip.match * 100)}%</span>
-          <span className="chip">{clip.source}</span>
-          <span className="ml-auto text-[9px] text-dim">{ROLE_LABELS[clip.role]}</span>
-        </div>
-        <p className="mb-0.5 truncate text-[12px] font-semibold text-bone">{clip.name}</p>
-        <p className="tnum text-[10px] text-dim">
-          {tc(clip.start, true)} → {tc(clip.end, true)} · {(clip.end - clip.start).toFixed(2)}s · {a.providerLabel}
-        </p>
-        <button className="btn mt-1.5 w-full px-2 py-1 text-[10.5px]" onClick={() => void studio.auditionClip(clip.id)}>
-          <Ear size={10} /> Audition
-        </button>
-      </div>
-
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-        <span className="eyebrow mb-2 block text-bone/80">Position &amp; fades</span>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-          <Slider label="Start" value={clip.start} min={0} max={studio.project?.duration ?? 600} step={0.01} fmt={(v) => tc(v, true)} onChange={(v) => patch({ start: v, end: Math.max(v + 0.05, clip.end) })} />
-          <Slider label="Length" value={clip.end - clip.start} min={0.05} max={60} step={0.01} fmt={(v) => `${v.toFixed(2)}s`} onChange={(v) => patch({ end: clip.start + v })} />
-          <Slider label="Fade in" value={clip.fadeIn} min={0} max={3} step={0.01} fmt={(v) => `${(v * 1000).toFixed(0)}ms`} onChange={(v) => patch({ fadeIn: v })} />
-          <Slider label="Fade out" value={clip.fadeOut} min={0} max={3} step={0.01} fmt={(v) => `${(v * 1000).toFixed(0)}ms`} onChange={(v) => patch({ fadeOut: v })} />
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-        <span className="eyebrow mb-2 block text-bone/80">Mix</span>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-          <Slider label="Gain" value={clip.gain} max={1.3} fmt={(v) => `${db(v)} dB`} onChange={(v) => patch({ gain: v })} />
-          <Slider label="Pan" value={clip.pan} min={-1} max={1} fmt={(v) => (Math.abs(v) < 0.03 ? 'C' : `${v < 0 ? 'L' : 'R'}${Math.round(Math.abs(v) * 100)}`)} onChange={(v) => patch({ pan: v })} />
-        </div>
-        <div className="mt-1.5 flex gap-1.5">
-          <button className={`btn flex-1 px-2 py-1 text-[10px] ${clip.muted ? 'border-blood/50 text-ember' : ''}`} onClick={() => patch({ muted: !clip.muted })}>
-            {clip.muted ? 'Unmute' : 'Mute'}
-          </button>
-          <button className={`btn flex-1 px-2 py-1 text-[10px] ${clip.solo ? 'border-orchid/50 text-orchid' : ''}`} onClick={() => patch({ solo: !clip.solo })}>
-            Solo
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-        <span className="eyebrow mb-2 flex items-center justify-between text-bone/80">
-          SOURCE + TRANSFORM
-          <span className="text-[8px] text-dim/70">nondestructive · original kept</span>
-        </span>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-          <Slider label="Playback rate" value={t.playbackRate} min={0.2} max={2.5} step={0.01} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => patchT({ playbackRate: v })} />
-          <Slider label="Pitch" value={t.pitch} min={-24} max={24} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v} st`} onChange={(v) => patchT({ pitch: v })} />
-          <Slider label="Gain trim" value={t.gainDb} min={-24} max={6} step={0.5} fmt={(v) => `${v > 0 ? '+' : ''}${v} dB`} onChange={(v) => patchT({ gainDb: v })} />
-          <Slider label="Reverb send" value={t.reverb} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patchT({ reverb: v })} />
-          <Slider label="Low-pass" value={t.lowpassHz ?? 20000} min={200} max={20000} step={50} fmt={(v) => (v >= 19900 ? 'off' : `${v} Hz`)} onChange={(v) => patchT({ lowpassHz: v >= 19900 ? null : v })} />
-          <Slider label="Slow modulation" value={t.slowModulate} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patchT({ slowModulate: v })} />
-        </div>
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          <button className={`chip ${t.reverse ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ reverse: !t.reverse })}>
-            reverse {t.reverse ? 'on' : 'off'}
-          </button>
-          <button className={`chip ${t.loop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ loop: !t.loop })}>
-            loop {t.loop ? 'on' : 'off'}
-          </button>
-          <button className={`chip ${t.crossfadeLoop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ crossfadeLoop: !t.crossfadeLoop })}>
-            crossfade loop {t.crossfadeLoop ? 'on' : 'off'}
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-        <span className="eyebrow mb-1.5 block text-bone/80">Provenance</span>
-        <p className="mb-1 text-[9.5px] leading-relaxed text-dim">
-          {a.providerLabel} · “{a.title}” by {a.creator} · id {a.soundId} · {a.license} · {a.quality}
-        </p>
-        <p className="mb-1.5 break-words text-[9px] leading-relaxed text-dim/80">credit: {a.creditLine}</p>
-        <a className="btn px-2 py-1 text-[9.5px]" href={a.sourceUrl} target="_blank" rel="noreferrer">
-          <ExternalLink size={9} /> Source page
-        </a>
-      </div>
-
-      <div className="flex gap-1.5">
-        <button className="btn flex-1 px-2 py-1.5 text-[10.5px]" onClick={() => void findAlt()} disabled={altBusy}>
-          {altBusy ? <RefreshCw size={10} className="animate-spin" /> : <RefreshCw size={10} />} Find alternative
-        </button>
-        <button className="btn px-2 py-1.5 text-ember/85 hover:text-ember" onClick={() => studio.removeClip(clip.id)}>
-          <Trash2 size={11} /> Delete
-        </button>
-      </div>
-      <p className="text-[8.5px] leading-relaxed text-dim/70">
-        FIND ALTERNATIVE reruns the same retrieval intent; choosing a new source keeps timeline location, gain, pan, processing and
-        fades. Replace swaps source audio + provenance only.
-      </p>
-    </div>
-  );
-}
-
-function Gauge({ label, value, unit = '%', color = '#ff3b5c' }: { label: string; value: number; unit?: string; color?: string }) {
-  return (
-    <div>
-      <div className="mb-1 flex items-baseline justify-between">
-        <span className="eyebrow text-[8px]">{label}</span>
-        <span className="tnum text-[10px] text-ash">
-          {value.toFixed(0)}
-          {unit}
-        </span>
-      </div>
-      <div className="h-[3px] overflow-hidden rounded-full bg-white/[0.08]">
-        <div
-          className="h-full rounded-full transition-[width] duration-700"
-          style={{ width: `${Math.min(100, value)}%`, background: color, boxShadow: `0 0 8px ${color}` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 export function MasterStrip({ studio }: { studio: Studio }) {
   const m = studio.master;
   const live = studio.audioOn && studio.playing;
@@ -230,14 +103,12 @@ export function MasterStrip({ studio }: { studio: Studio }) {
 }
 
 export default function RightPanel({ studio }: { studio: Studio }) {
-  const [tab, setTab] = useState<'mix' | 'clip' | 'cloud' | 'out'>('mix');
-  const { project, activeScene, gpuLoad, analyzing, analyzeProgress, logs, jobs } = studio;
-  void studio.selectedClip; // Tab availability is fixed; ClipInspector reads it directly
+  const [tab, setTab] = useState<'mix' | 'score' | 'out'>('score');
+  const { project, activeScene, logs, jobs } = studio;
 
   const TABS = [
+    { id: 'score' as const, label: 'Score', icon: Wand2 },
     { id: 'mix' as const, label: 'Mix', icon: SlidersHorizontal },
-    { id: 'clip' as const, label: 'Clip', icon: Waves },
-    { id: 'cloud' as const, label: 'Cloud', icon: Server },
     { id: 'out' as const, label: 'Export', icon: Download },
   ];
 
@@ -287,51 +158,36 @@ export default function RightPanel({ studio }: { studio: Studio }) {
           </div>
         )}
 
-        {tab === 'clip' && <ClipInspector studio={studio} />}
-
-        {tab === 'cloud' && (
+        {tab === 'score' && (
           <div className="flex flex-col gap-3.5">
-            <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-              <div className="mb-2.5 flex items-center gap-2">
-                <Cpu size={13} className="text-ember" />
-                <span className="eyebrow text-bone/80">Compute shard</span>
-                <span className="chip ml-auto border-ember/30 text-ember">
-                  <span className="h-1.5 w-1.5 rounded-full bg-ember livedot" /> live
-                </span>
-              </div>
-              <div className="flex flex-col gap-2">
-                <Gauge label="GPU A100 · eu-north-1b" value={gpuLoad} />
-                <Gauge label="VRAM 80 GB" value={34 + gpuLoad * 0.4} color="#7d6bff" />
-                <Gauge label="Diffusion queue" value={analyzing ? analyzeProgress : 100} color="#4b8f9a" />
-              </div>
-              <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-white/[0.06] pt-2.5">
-                {[
-                  ['Scenes', project ? `${studio.readyCount}/${project.scenes.length}` : '—'],
-                  ['Layers', String(studio.layerCount)],
-                  ['Credits', '842'],
-                ].map(([k, v]) => (
-                  <div key={k}>
-                    <p className="eyebrow text-[8px]">{k}</p>
-                    <p className="tnum text-[13px] font-semibold text-bone">{v}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <ScoringPanel studio={studio} />
+            <ClipInspector studio={studio} />
 
             <div className="rounded-lg border border-white/[0.07] bg-black/25">
               <div className="flex items-center gap-2 border-b border-white/[0.06] px-2.5 py-2">
                 <Terminal size={12} className="text-orchid" />
-                <span className="eyebrow text-bone/80">Processing log</span>
+                <span className="eyebrow text-bone/80">Activity log</span>
                 <span className="chip tnum ml-auto">{logs.length}</span>
               </div>
-              <div className="max-h-[320px] overflow-y-auto p-2">
+              <div className="max-h-[260px] overflow-y-auto p-2">
                 {logs.length === 0 && <p className="p-3 text-center text-[11px] text-dim">No activity yet.</p>}
                 {logs.map((l) => (
                   <div key={l.id} className="flex gap-2 border-b border-white/[0.03] py-1.5 last:border-0">
-                    <span className="tnum shrink-0 text-[9px] text-dim">{new Date(l.at).toLocaleTimeString([], { hour12: false })}</span>
+                    <span className="tnum shrink-0 text-[9px] text-dim">
+                      {new Date(l.at).toLocaleTimeString([], { hour12: false })}
+                    </span>
                     <span
                       className="tnum shrink-0 text-[9px] uppercase"
-                      style={{ color: l.level === 'ok' ? '#4b8f9a' : l.level === 'warn' ? '#b9a37e' : l.level === 'gpu' ? '#a86bd6' : '#5c566e' }}
+                      style={{
+                        color:
+                          l.level === 'ok'
+                            ? '#4b8f9a'
+                            : l.level === 'warn'
+                              ? '#b9a37e'
+                              : l.level === 'gpu'
+                                ? '#a86bd6'
+                                : '#5c566e',
+                      }}
                     >
                       {l.level}
                     </span>

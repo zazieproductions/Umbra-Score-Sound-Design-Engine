@@ -1,0 +1,46 @@
+# ACE-Step 1.5 inference dependencies.
+#
+# These mirror ACE-Step's own requirements for the pieces Umbra actually uses.
+# We deliberately do NOT mechanically install every ACE-Step dependency:
+# gradio, nano-vllm, flash-attn, torchao, tensorboard, matplotlib and the
+# training stack are not needed to run inference from Umbra's backend.
+#
+#   pip install -r backend/requirements.txt -r backend/requirements-ace-step.txt
+#
+# ---------------------------------------------------------------------------
+# PyTorch: install the right build for your machine FIRST, then this file.
+#
+#   CUDA 12.8   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+#   Apple       pip install torch torchaudio          # ships with MPS support
+#   CPU only    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# ---------------------------------------------------------------------------
+
+torch>=2.7.1
+torchaudio>=2.7.1
+
+# Qwen3 text embedding stage + diffusion pipeline interfaces.
+# Upper bound matches ACE-Step's own pin.
+transformers>=4.51.0,<4.58.0
+diffusers>=0.37.0
+accelerate>=1.12.0
+
+# Signal processing and IO used by the pipeline.
+scipy>=1.10.1
+soundfile>=0.13.1
+einops>=0.8.1
+safetensors>=0.4.0
+
+# ACE-Step itself. Install from source — it is not on PyPI:
+#   git clone https://github.com/ace-step/ACE-Step-1.5
+#   pip install -e ACE-Step-1.5
+#
+# Then run its API server and point Umbra at it:
+#   ACESTEP_API_HOST=127.0.0.1 ACESTEP_API_PORT=8001 python -m acestep.api_server
+
+# ---------------------------------------------------------------------------
+# Apple Silicon acceleration (optional, macOS arm64 only).
+# ACE-Step accepts "mlx" as an LM backend on Apple Silicon; MPS handles the
+# diffusion transformer. Both are no-ops elsewhere, hence the markers.
+# ---------------------------------------------------------------------------
+mlx>=0.25.2; sys_platform == 'darwin' and platform_machine == 'arm64'
+mlx-lm>=0.20.0; sys_platform == 'darwin' and platform_machine == 'arm64'

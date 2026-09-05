@@ -1,430 +1,375 @@
-"""
-Umbra Score ML Backend
+"""UMBRA local ML backend.
 
-FastAPI application for the hybrid procedural + generative audio system.
+A small FastAPI service that owns everything Python should own:
+
+    trained-model inference · model loading · embeddings · heavy analysis
+
+and nothing that the browser already does well. Web Audio keeps the timeline,
+playback, editing, realtime procedural synthesis, mixing and metering.
+
+Run it with::
+
+    python -m uvicorn backend.app:app --port 8000 --reload
+
+or::
+
+    python scripts/run_backend.py
+
+The Vite dev server proxies ``/api`` here, so the browser only ever talks to
+its own origin — no CORS games and nothing hard-coded to localhost in
+frontend code.
 """
 
-import os
+from __future__ import annotations
+
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
 
-from .providers.registry import registry
-from .providers.procedural_bridge import ProceduralBridge
-from .providers.stable_audio import StableAudioProvider
-from .providers.mmaudio import MMAudioProvider
-from .providers.clap import ClapProvider
-from .providers.pyscenedetect import PySceneDetectProvider
+from backend.analysis import embeddings as embeddings_service
+from backend.analysis.scenes import detect_cuts, plan_project, plan_scene
+from backend.analysis.spotting import HORROR_PRESETS, build_prompt
+from backend.analysis.video import probe_video, toolchain_status
+from backend.analysis.waveform import analyze_features, generate_peaks
+from backend.providers.base import GenerationRequest, ProviderError
+from backend.providers.registry import get_registry, route_intent
+from backend.services import model_manager
+from backend.services.audio_store import AudioDecodeError, get_audio_store
+from backend.services.device import runtime_summary
+from backend.services.generation_jobs import JobManager
 
-from .schemas.providers import ProviderInfo, DeviceType, ProviderStatus
-from .schemas.generation import (
-    GenerationRequest,
-    GenerationResult,
-    GeneratedAudio,
-    SemanticSearchRequest,
-    SemanticSearchResponse,
-)
-from .schemas.analysis import SceneDetectionRequest, SceneDetectionResponse
-
-from .services.model_manager import ModelManager
-from .services.audio_store import AudioStore
-from .services.jobs import JobManager
-
-# Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=os.environ.get("UMBRA_LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("umbra.app")
 
-# Paths
-BASE_DIR = Path(__file__).parent.parent
-DATA_DIR = BASE_DIR / "data"
-AUDIO_DIR = DATA_DIR / "audio"
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-
-# Services
-model_manager = ModelManager(
-    models_dir=str(BASE_DIR / "models"),
-    cache_dir=str(DATA_DIR / "cache"),
-)
-audio_store = AudioStore(
-    data_dir=str(DATA_DIR),
-    audio_dir=str(AUDIO_DIR),
-)
-job_manager = JobManager()
+VERSION = "0.1.0"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    # Startup
-    logger.info("Starting Umbra Score ML Backend")
-    
-    # Register providers
-    registry.register(ProceduralBridge())
-    
-    if StableAudioProvider().is_installed():
-        registry.register(StableAudioProvider())
-    
-    if MMAudioProvider().is_installed():
-        registry.register(MMAudioProvider())
-    
-    if ClapProvider().is_installed():
-        registry.register(ClapProvider())
-    
-    if PySceneDetectProvider().is_installed():
-        registry.register(PySceneDetectProvider())
-    
-    # Try to load all available providers
-    await registry.load_all()
-    
-    logger.info(f"Registered {len(registry)} providers")
-    
-    yield
-    
-    # Shutdown
-    logger.info("Shutting down Umbra Score ML Backend")
-    await registry.unload_all()
+    registry = get_registry()
+    store = get_audio_store()
+    jobs = JobManager(registry, workers=int(os.environ.get("UMBRA_WORKERS", "1")))
+    await jobs.start()
+
+    app.state.registry = registry
+    app.state.store = store
+    app.state.jobs = jobs
+
+    ready = [s.id for s in registry.statuses() if s.ready]
+    log.info("UMBRA backend %s ready — providers online: %s", VERSION, ", ".join(ready) or "none")
+    log.info("audio store: %s", store.root)
+    try:
+        yield
+    finally:
+        await jobs.stop()
 
 
-# Create FastAPI app
-app = FastAPI(
-    title="Umbra Score ML Backend",
-    description="Hybrid procedural + generative audio generation API",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="UMBRA local ML backend", version=VERSION, lifespan=lifespan)
 
-# CORS for frontend
+# The browser talks to the Vite origin and Vite proxies here, so CORS is only
+# a convenience for direct API poking during development.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.e2b\.app$",
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
-# ===================== Health & Status =====================
+def _err(exc: ProviderError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"error": str(exc), "hint": exc.hint},
+    )
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+
+# --------------------------------------------------------------------- health
+
+
+@app.get("/api/health")
+async def health() -> Dict[str, Any]:
+    """Liveness plus a fully-real runtime snapshot."""
     return {
-        "status": "healthy",
-        "version": "0.1.0",
-        "providers": len(registry),
+        "status": "ok",
+        "service": "umbra-backend",
+        "version": VERSION,
+        "runtime": runtime_summary(),
+        "audioStore": app.state.store.stats(),
+        "jobs": app.state.jobs.stats(),
     }
+
+
+# ------------------------------------------------------------------ providers
 
 
 @app.get("/api/providers")
-async def list_providers():
-    """List all registered providers."""
+async def providers() -> Dict[str, Any]:
+    """Every provider with genuinely-probed install state and capabilities."""
+    return {"providers": [s.to_json() for s in app.state.registry.statuses()]}
+
+
+@app.get("/api/models")
+async def models() -> Dict[str, Any]:
+    """The Models view: real checkpoints on disk, real packages, real devices."""
     return {
-        "providers": [p.model_dump() for p in registry.list_providers()],
-        "available": [p.model_dump() for p in registry.available_providers],
+        "runtime": runtime_summary(),
+        "providers": [s.to_json() for s in app.state.registry.statuses()],
+        **model_manager.model_report().to_json(),
     }
 
 
-@app.get("/api/providers/{provider_name}")
-async def get_provider(provider_name: str):
-    """Get details about a specific provider."""
-    provider = registry.get(provider_name)
-    if not provider:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found")
-    return provider.info.model_dump()
+# ------------------------------------------------------------------- planning
 
 
-@app.get("/api/system/device")
-async def get_device_info():
-    """Get system device information."""
-    return model_manager.get_device_info()
+@app.post("/api/plan/scene")
+async def plan_one_scene(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Structured musical intent for one span of film, before any generation."""
+    start = float(payload.get("start", 0.0))
+    # accept either an explicit end or a duration
+    if payload.get("end") is not None:
+        end = float(payload["end"])
+    elif payload.get("duration") is not None:
+        end = start + float(payload["duration"])
+    else:
+        end = start + 12.0
 
-
-@app.get("/api/system/models")
-async def list_models():
-    """List installed models."""
-    return {
-        "models": model_manager.list_installed_models(),
-        "cache": str(DATA_DIR / "cache"),
-    }
-
-
-# ===================== Generation =====================
-
-@app.post("/api/generate", response_model=list[GenerationResult])
-async def generate_audio(request: GenerationRequest):
-    """
-    Generate audio using the specified provider.
-    
-    Returns list of GeneratedAudio (one per variant).
-    """
-    provider = registry.get(request.provider.value)
-    if not provider:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provider '{request.provider.value}' not found"
-        )
-    
-    if not await provider.is_available():
-        raise HTTPException(
-            status_code=503,
-            detail=f"Provider '{request.provider.value}' is not available"
-        )
-    
-    try:
-        results = await provider.generate(request, str(AUDIO_DIR))
-        
-        # Save results to audio store
-        for result in results:
-            if result.filepath:
-                audio_store.save(result)
-        
-        return [r.model_dump() for r in results]
-        
-    except Exception as e:
-        logger.error(f"Generation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/audio/{audio_id}")
-async def get_audio(audio_id: str):
-    """Get audio metadata."""
-    audio = audio_store.load(audio_id)
-    if not audio:
-        raise HTTPException(status_code=404, detail="Audio not found")
-    return audio.model_dump()
-
-
-@app.get("/api/audio/{audio_id}/download")
-async def download_audio(audio_id: str):
-    """Download audio file."""
-    audio = audio_store.load(audio_id)
-    if not audio:
-        raise HTTPException(status_code=404, detail="Audio not found")
-    
-    if not audio.filepath or not Path(audio.filepath).exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    
-    return FileResponse(
-        audio.filepath,
-        media_type="audio/wav",
-        filename=f"{audio_id}.wav",
+    plan = plan_scene(
+        start=start,
+        end=end,
+        tension=float(payload.get("tension", 0.5)),
+        motion=float(payload.get("motion", 0.4)),
+        scene_id=payload.get("sceneId"),
+        label=payload.get("label") or "Scene",
+        index=int(payload.get("index", 1)),
+        intent=payload.get("intent") or "",
     )
+    return {"plan": plan.to_json(), "text": plan.as_text()}
 
 
-@app.get("/api/audio/{audio_id}/waveform")
-async def get_waveform(
-    audio_id: str,
-    peaks: int = Query(default=200, ge=50, le=1000),
-):
-    """Get waveform peaks for visualization."""
-    from .analysis.waveform import AudioAnalyzer
-    
-    audio = audio_store.load(audio_id)
-    if not audio:
-        raise HTTPException(status_code=404, detail="Audio not found")
-    
-    if not audio.filepath or not Path(audio.filepath).exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    
-    try:
-        waveform_peaks = AudioAnalyzer.generate_waveform(audio.filepath, peaks)
-        return {"audio_id": audio_id, "peaks": waveform_peaks}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/api/plan/project")
+async def plan_whole_project(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    scenes = payload.get("scenes") or []
+    plans = plan_project(scenes)
+    return {"plans": [p.to_json() for p in plans]}
 
 
-@app.delete("/api/audio/{audio_id}")
-async def delete_audio(audio_id: str):
-    """Delete audio from store."""
-    if audio_store.delete(audio_id):
-        return {"status": "deleted", "id": audio_id}
-    raise HTTPException(status_code=404, detail="Audio not found")
-
-
-# ===================== Semantic Search =====================
-
-@app.post("/api/search", response_model=SemanticSearchResponse)
-async def semantic_search(request: SemanticSearchRequest):
-    """
-    Perform semantic search on audio assets.
-    """
-    # Find CLAP provider
-    providers = registry.get_by_capability(
-        __import__('backend.schemas.providers', fromlist=['ProviderCapability']).ProviderCapability.SEMANTIC_SEARCH
+@app.post("/api/prompt/build")
+async def prompt_build(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Horror-first prompt interpretation — always shown to the composer."""
+    plan = build_prompt(
+        payload.get("intent") or payload.get("prompt") or "",
+        key=payload.get("key"),
+        mode=payload.get("mode"),
+        bpm=payload.get("bpm"),
+        time_signature=payload.get("timeSignature"),
+        duration=float(payload.get("duration", 12.0)),
+        density=payload.get("density"),
+        dread=payload.get("dread"),
+        tension=payload.get("tension"),
+        extra_negatives=payload.get("extraNegatives"),
+        instrumental=bool(payload.get("instrumental", True)),
     )
-    
-    if not providers:
-        raise HTTPException(
-            status_code=503,
-            detail="Semantic search not available (CLAP not installed)"
-        )
-    
-    clap = providers[0]
-    
-    try:
-        response = await clap.search(request)
-        return response.model_dump()
-    except Exception as e:
-        logger.error(f"Search failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"plan": plan.to_json()}
 
 
-@app.post("/api/index")
-async def index_audio(
-    audio_id: str,
-    filepath: str,
-    prompt: str = None,
-    duration: float = 0,
-):
-    """
-    Add an audio file to the search index.
-    """
-    # Find CLAP provider
-    from backend.schemas.providers import ProviderCapability
-    
-    providers = registry.get_by_capability(ProviderCapability.AUDIO_EMBEDDING)
-    
-    if not providers:
-        raise HTTPException(
-            status_code=503,
-            detail="Audio indexing not available (CLAP not installed)"
-        )
-    
-    clap = providers[0]
-    
-    try:
-        success = clap.index_audio(
-            audio_id=audio_id,
-            filepath=filepath,
-            prompt=prompt,
-            duration=duration,
-        )
-        return {"indexed": success, "audio_id": audio_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/api/prompt/presets")
+async def prompt_presets() -> Dict[str, Any]:
+    return {"presets": HORROR_PRESETS}
 
 
-# ===================== Scene Detection =====================
-
-@app.post("/api/scenes/detect", response_model=SceneDetectionResponse)
-async def detect_scenes(request: SceneDetectionRequest):
-    """
-    Detect scene boundaries in a video file.
-    """
-    # Find PySceneDetect provider
-    providers = registry.get_by_capability(
-        __import__('backend.schemas.providers', fromlist=['ProviderCapability']).ProviderCapability.SCENE_DETECTION
+@app.post("/api/route")
+async def route(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Explain which engine should handle a natural-language request."""
+    available = [s.id for s in app.state.registry.statuses() if s.ready]
+    decision = route_intent(
+        payload.get("text") or "",
+        has_video_selection=bool(payload.get("hasVideoSelection")),
+        available=available,
     )
-    
-    if not providers:
-        raise HTTPException(
+    return {"route": decision.to_json(), "available": available}
+
+
+# ----------------------------------------------------------------- generation
+
+
+@app.post("/api/generate")
+async def generate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Queue a generation job. Returns immediately with a job id."""
+    request = GenerationRequest.from_json(payload)
+    provider = app.state.registry.get(request.provider)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider '{request.provider}'")
+
+    status = provider.status()
+    if not status.ready:
+        return JSONResponse(
             status_code=503,
-            detail="Scene detection not available (PySceneDetect not installed)"
+            content={
+                "error": f"{status.label} is not ready.",
+                "hint": status.install_hint,
+                "notes": status.notes,
+            },
         )
-    
-    pyscenedetect = providers[0]
-    
-    try:
-        response = await pyscenedetect.detect_scenes(
-            request,
-            output_dir=str(DATA_DIR / "thumbnails"),
-        )
-        return response.model_dump()
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Scene detection failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
+    job = app.state.jobs.submit(request)
+    return {"job": job.to_json()}
 
-# ===================== Jobs =====================
 
 @app.get("/api/jobs")
-async def list_jobs(state: str = None):
-    """List all jobs."""
-    from .services.jobs import JobState
-    
-    job_state = JobState(state) if state else None
-    jobs = job_manager.list_jobs(state=job_state)
-    
+async def list_jobs(limit: int = Query(50, ge=1, le=200)) -> Dict[str, Any]:
     return {
-        "jobs": [
-            {
-                "id": j.id,
-                "type": j.job_type,
-                "state": j.state.value,
-                "progress": j.progress,
-                "message": j.message,
-                "created_at": j.created_at.isoformat(),
-                "started_at": j.started_at.isoformat() if j.started_at else None,
-                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
-                "error": j.error,
-            }
-            for j in jobs
-        ]
+        "jobs": [j.to_json() for j in app.state.jobs.list(limit)],
+        "stats": app.state.jobs.stats(),
     }
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str):
-    """Get job details."""
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    return {
-        "id": job.id,
-        "type": job.job_type,
-        "state": job.state.value,
-        "progress": job.progress,
-        "message": job.message,
-        "created_at": job.created_at.isoformat(),
-        "started_at": job.started_at.isoformat() if job.started_at else None,
-        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-        "error": job.error,
-        "result": job.result,
-    }
+async def get_job(job_id: str) -> Dict[str, Any]:
+    job = app.state.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"job": job.to_json()}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-async def cancel_job(job_id: str):
-    """Cancel a running job."""
-    if job_manager.cancel_job(job_id):
-        return {"status": "cancelled", "job_id": job_id}
-    raise HTTPException(status_code=400, detail="Job cannot be cancelled")
+async def cancel_job(job_id: str) -> Dict[str, Any]:
+    ok = app.state.jobs.cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail="job is not cancellable")
+    return {"cancelled": True}
 
 
-# ===================== Storage =====================
-
-@app.get("/api/storage/stats")
-async def get_storage_stats():
-    """Get storage statistics."""
-    return audio_store.get_storage_stats()
+# ---------------------------------------------------------------------- audio
 
 
-@app.post("/api/storage/cleanup")
-async def cleanup_storage():
-    """Clean up orphaned metadata."""
-    result = audio_store.cleanup_orphaned()
-    return result
+@app.get("/api/audio/{audio_id}")
+async def get_audio(audio_id: str):
+    """Serve real audio bytes. This is what the timeline decodes and plays."""
+    rec = app.state.store.get(audio_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="audio not found")
+    path = Path(rec.path)
+    if not path.exists():
+        raise HTTPException(status_code=410, detail="audio file no longer on disk")
+    media = "audio/wav" if path.suffix.lower() == ".wav" else "application/octet-stream"
+    return FileResponse(path, media_type=media, filename=rec.filename)
 
 
-# ===================== Run Server =====================
+@app.get("/api/audio")
+async def list_audio(kind: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "audio": [r.to_json() for r in app.state.store.list(kind)],
+        "stats": app.state.store.stats(),
+    }
 
-if __name__ == "__main__":
-    import uvicorn
-    
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
+
+@app.delete("/api/audio/{audio_id}")
+async def delete_audio(audio_id: str) -> Dict[str, Any]:
+    if not app.state.store.delete(audio_id):
+        raise HTTPException(status_code=404, detail="audio not found")
+    return {"deleted": True}
+
+
+@app.post("/api/audio/upload")
+async def upload_audio(
+    file: UploadFile = File(...),
+    kind: str = Query("reference"),
+) -> Dict[str, Any]:
+    """Accept composer-supplied reference audio.
+
+    It stays on this machine. Umbra never uploads a user's reference material
+    anywhere, and never fetches third-party copyrighted audio to condition on.
+    """
+    data = await file.read()
+    suffix = Path(file.filename or "reference.wav").suffix or ".wav"
+    try:
+        rec = app.state.store.register_bytes(
+            data,
+            provider="user",
+            suffix=suffix,
+            kind=kind,
+            metadata={"originalName": file.filename, "local": True},
+            filename=file.filename,
+        )
+    except AudioDecodeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"audio": rec.to_json()}
+
+
+# --------------------------------------------------------------------- search
+
+
+@app.post("/api/search")
+async def search(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Semantic library search via CLAP, over local files only."""
+    query = (payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    return await embeddings_service.search_library(query, limit=int(payload.get("limit", 12)))
+
+
+# ------------------------------------------------------------------- analysis
+
+
+@app.post("/api/analysis/cuts")
+async def analysis_cuts(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Real cut detection with PySceneDetect, or an honest 'not installed'."""
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    result = detect_cuts(
+        Path(path),
+        threshold=float(payload.get("threshold", 27.0)),
+        min_scene_seconds=float(payload.get("minSceneSeconds", 1.5)),
     )
+    return result.to_json()
+
+
+@app.post("/api/analysis/video")
+async def analysis_video(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Real container metadata via ffprobe, or an honest 'ffmpeg not found'."""
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    return probe_video(Path(path)).to_json()
+
+
+@app.get("/api/analysis/toolchain")
+async def analysis_toolchain() -> Dict[str, Any]:
+    """Which external video tools are actually on PATH."""
+    return toolchain_status()
+
+
+@app.get("/api/audio/{audio_id}/peaks")
+async def audio_peaks(audio_id: str, bins: int = Query(200, ge=16, le=2000)) -> Dict[str, Any]:
+    """Waveform peaks for a stored file.
+
+    The frontend normally draws from its own decoded AudioBuffer; this exists
+    for reference material the browser has not decoded.
+    """
+    path = app.state.store.path_for(audio_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"unknown audio id '{audio_id}'")
+    return generate_peaks(path, bins).to_json()
+
+
+@app.get("/api/audio/{audio_id}/features")
+async def audio_features(audio_id: str) -> Dict[str, Any]:
+    """Measured RMS / peak / crest for a stored file.
+
+    Real measurements — used to catch a silent or clipped generation result
+    rather than letting it reach the timeline unnoticed.
+    """
+    path = app.state.store.path_for(audio_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"unknown audio id '{audio_id}'")
+    return analyze_features(path).to_json()

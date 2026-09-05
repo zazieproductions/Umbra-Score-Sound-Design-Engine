@@ -24,3 +24,29 @@ dist-ssr
 *.sw?
 .vite-source-tags.js
 .vercel
+
+# Python backend
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local Umbra runtime state (generated audio, job scratch)
+.umbra/
+
+# Model weights — never committed. Fetch with scripts/setup_models.py
+checkpoints/
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.gguf
+
+# Personalization material is the user's own audio and stays local
+training/user_audio/
+training/datasets/
+training/runs/
