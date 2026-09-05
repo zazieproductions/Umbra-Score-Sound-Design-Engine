@@ -9,7 +9,7 @@
 import type { LibraryAsset, ProvenanceEntry } from './types';
 
 const DB_NAME = 'umbra-sound-library';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface CacheRecord {
   cacheKey: string;
@@ -54,6 +54,12 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('cache')) db.createObjectStore('cache', { keyPath: 'cacheKey' });
       if (!db.objectStoreNames.contains('userFiles')) db.createObjectStore('userFiles', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('provenance')) db.createObjectStore('provenance', { keyPath: 'id' });
+      // Project drafts live in the same local database so their referenced
+      // cache blobs and the draft itself are evicted/kept together.
+      if (!db.objectStoreNames.contains('projects')) {
+        const projects = db.createObjectStore('projects', { keyPath: 'id' });
+        projects.createIndex('savedAt', 'savedAt');
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error('IndexedDB unavailable'));
@@ -106,10 +112,18 @@ export const soundCache = {
   list(): Promise<CacheRecord[]> {
     return getAll<CacheRecord>('cache');
   },
-  /** Remove assets no project references. Returns number removed. */
-  clearUnused(keepProjectIds: string[]): Promise<number> {
+  /**
+   * Remove assets the open project(s) no longer reference. A record is kept
+   * when its key is explicitly listed (`keepKeys`) OR when its `projects`
+   * ownership list contains a kept project id — the second clause protects
+   * records written before ownership tracking existed.
+   */
+  clearUnused(keepProjectIds: string[], keepKeys: string[] = []): Promise<number> {
+    const keep = new Set(keepKeys);
     return soundCache.list().then((records) => {
-      const dead = records.filter((r) => !r.projects.some((p) => keepProjectIds.includes(p)));
+      const dead = records.filter(
+        (r) => !keep.has(r.cacheKey) && !r.projects.some((p) => keepProjectIds.includes(p)),
+      );
       return Promise.all(
         dead.map((r) => tx('cache', 'readwrite', (s) => s.delete(r.cacheKey))),
       ).then(() => dead.length);
@@ -222,6 +236,50 @@ export const settingsStore = {
   },
   save<T>(value: T): void {
     writeJson(SETTINGS_KEY, value);
+  },
+};
+
+/* ------------------------------------------------- project drafts ---- */
+
+/**
+ * A serialised project draft. Blob URLs are never persisted — they die with
+ * the page. `serialized` must already be URL-free (see `persistence.ts`);
+ * hydration rebuilds live object URLs from cache blobs on restore.
+ */
+export interface SavedProjectDraft {
+  id: string;
+  name: string;
+  duration: number;
+  savedAt: number;
+  /** whether the source video was a local blob that cannot be restored */
+  hadLocalVideo: boolean;
+  serialized: unknown;
+  master: unknown;
+}
+
+export const projectStore = {
+  save(draft: SavedProjectDraft): Promise<SavedProjectDraft> {
+    return tx('projects', 'readwrite', (s) => s.put(draft)).then(() => draft);
+  },
+  async latest(): Promise<SavedProjectDraft | undefined> {
+    return openDb().then((db) => new Promise<SavedProjectDraft | undefined>((resolve, reject) => {
+      const t = db.transaction('projects', 'readonly');
+      const idx = t.objectStore('projects').index('savedAt');
+      const req = idx.openCursor(null, 'prev');
+      req.onsuccess = () => resolve(req.result?.value as SavedProjectDraft | undefined);
+      req.onerror = () => reject(req.error ?? new Error('IndexedDB read failed'));
+    }));
+  },
+  async list(): Promise<SavedProjectDraft[]> {
+    return openDb().then((db) => new Promise<SavedProjectDraft[]>((resolve, reject) => {
+      const t = db.transaction('projects', 'readonly');
+      const req = t.objectStore('projects').getAll();
+      req.onsuccess = () => resolve((req.result as SavedProjectDraft[] | undefined) ?? []);
+      req.onerror = () => reject(req.error ?? new Error('IndexedDB read failed'));
+    })).then((rows) => rows.sort((a, b) => b.savedAt - a.savedAt));
+  },
+  async remove(id: string): Promise<void> {
+    await tx('projects', 'readwrite', (s) => s.delete(id));
   },
 };
 

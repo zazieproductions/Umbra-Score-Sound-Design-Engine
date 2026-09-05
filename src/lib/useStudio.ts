@@ -23,6 +23,7 @@ import { addLayer as makeLayer, analyzeProject, regenerateLayer } from './genera
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
 import { download, renderClipStem, renderScore, renderStem } from './render';
 import { clipEnd, moveClip, splitClip, trimClip } from './clips';
+import { discardLatestSavedProject, hydrateClips, loadLatestSnapshot, persistProject } from './persistence';
 import { useGeneration } from './useGeneration';
 import type { GenerateRequest } from './providers';
 // Library imports — preserve PR7 retrieval completely
@@ -54,12 +55,16 @@ export function useStudio() {
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
-  const [regenerating, setRegenerating] = useState<Record<string, number>>({});
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   /** in/out points on the project timeline used to target generation */
   const [range, setRange] = useState<{ start: number; end: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const timers = useRef<number[]>([]);
+
+  /* ------------------------------------------------- draft persistence -- */
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [hasSavedDraft, setHasSavedDraft] = useState(false);
 
   /* -------------------------------------------------- sound library -- */
   const [creds, setCreds] = useState<FreesoundCredentials>(() =>
@@ -123,61 +128,100 @@ export function useStudio() {
 
   useEffect(
     () => () => {
-      timers.current.forEach((t) => window.clearTimeout(t));
       engine.stop();
     },
     [],
   );
 
-  const later = (fn: () => void, ms: number) => {
-    timers.current.push(window.setTimeout(fn, ms));
-  };
+  /* Restore the newest local project draft once on mount. Blob URLs died with
+   * the previous page — hydration rebuilds them from the sound cache or by
+   * re-rendering deterministic procedural clips, and reports what could not
+   * be rebuilt by name. State updates happen inside the async continuation,
+   * never synchronously in the effect body. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await loadLatestSnapshot();
+        if (!snap || cancelled) return;
+        const { project, warnings } = await hydrateClips(snap.project);
+        if (cancelled) return;
+        engine.setMaster(snap.master);
+        setProject(project);
+        setActiveSceneId(project.scenes[0]?.id ?? null);
+        setMasterState(snap.master);
+        setSavedAt(snap.savedAt);
+        setHasSavedDraft(true);
+        setSaveState('saved');
+        log(`restored project "${project.name}" from the local draft (${new Date(snap.savedAt).toLocaleTimeString()})`, 'ok');
+        warnings.forEach((w) => log(w, 'warn'));
+        if (snap.hadLocalVideo && !project.videoUrl) {
+          log('the source video was a local file and cannot be restored after a reload — picture offline, audio and edits intact', 'warn');
+        }
+      } catch (e) {
+        log(`could not restore the saved project: ${(e as Error).message}`, 'warn');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [log]);
+
+  /* Debounced draft autosave. The project object is the durable record; audio
+   * blobs stay in the sound cache keyed to this project id. */
+  useEffect(() => {
+    if (!project) return;
+    const t = window.setTimeout(() => {
+      setSaveState('saving');
+      persistProject(project, master)
+        .then(() => {
+          setSavedAt(Date.now());
+          setHasSavedDraft(true);
+          setSaveState('saved');
+          setSaveError(null);
+        })
+        .catch((e: unknown) => {
+          setSaveState('error');
+          setSaveError((e as Error).message);
+          log(`autosave failed: ${(e as Error).message}`, 'warn');
+        });
+    }, 900);
+    return () => window.clearTimeout(t);
+  }, [project, master, log]);
 
   /* ------------------------------------------------ ingest + analysis */
 
   const ingest = useCallback(
-    (name: string, duration: number, videoUrl: string | null, sourceLabel: string) => {
-      const p = analyzeProject(name, duration, videoUrl, sourceLabel);
+    (name: string, duration: number, videoUrl: string | null, sourceLabel: string, resolution?: string) => {
+      // Deterministic structural plan — computed synchronously, no fake
+      // per-scene "analysis" theatre. Real shot analysis is a backend
+      // capability and is reported separately when it actually runs.
+      const p = analyzeProject(name, duration, videoUrl, sourceLabel, resolution);
       setProject(p);
-      setActiveSceneId(p.scenes[0].id);
+      setActiveSceneId(p.scenes[0]?.id ?? null);
       setTime(0);
       setPlaying(false);
-      setAnalyzing(true);
-      setAnalyzeProgress(0);
-      log(`ingest: ${name} · ${duration.toFixed(1)}s`, 'ok');
-
-      const total = p.scenes.length;
-      p.scenes.forEach((s, i) => {
-        later(() => {
-          setProject((cur) =>
-            cur ? { ...cur, scenes: cur.scenes.map((x) => (x.id === s.id ? { ...x, status: 'analyzing' } : x)) } : cur,
-          );
-          log(`analysis: scene ${s.index} · shot boundary @ ${s.start.toFixed(2)}s · tension ${(s.tension * 100).toFixed(0)}%`, 'info');
-        }, 350 + i * 520);
-        later(() => {
-          setProject((cur) =>
-            cur ? { ...cur, scenes: cur.scenes.map((x) => (x.id === s.id ? { ...x, status: 'generating' } : x)) } : cur,
-          );
-          log(`scoring: scene ${s.index} · scoring ${s.layers.length} layers into ${s.layers[0]?.space ?? 'hall'} space`, 'gpu');
-        }, 700 + i * 520);
-        later(() => {
-          setProject((cur) =>
-            cur ? { ...cur, scenes: cur.scenes.map((x) => (x.id === s.id ? { ...x, status: 'ready' } : x)) } : cur,
-          );
-          setAnalyzeProgress(((i + 1) / total) * 100);
-          log(`scene ${s.index} ready · ${s.layers.length} stems · ${s.hits.length} sync hits`, 'ok');
-          if (i === total - 1) {
-            setAnalyzing(false);
-            log('pipeline complete', 'ok');
-          }
-        }, 1200 + i * 520);
-      });
+      setAnalyzing(false);
+      setAnalyzeProgress(100);
+      setSavedAt(null);
+      setSaveState('idle');
+      const layers = p.scenes.reduce((a, s) => a + s.layers.length, 0);
+      const hits = p.scenes.reduce((a, s) => a + s.hits.length, 0);
+      log(`ingest: ${name} · ${duration.toFixed(1)}s · ${sourceLabel}`, 'ok');
+      log(
+        `structural plan: ${p.scenes.length} scene block(s) · ${layers} procedural layer(s) · ${hits} sync point(s) — deterministic local layout`,
+        'info',
+      );
+      log(
+        'layers are synthesised live by the Web Audio voices — turn the monitor on and play to hear the stack; bounces render the same graph offline',
+        'info',
+      );
     },
     [log],
   );
 
   const loadDemo = useCallback(() => {
-    ingest('NIGHTSHIFT_reel_v4.mov', 148, null, 'demo · 4K ProRes proxy');
+    ingest('NIGHTSHIFT_reel_v4 (demo template)', 148, null, 'demo template — no video file', '4K · demo template');
   }, [ingest]);
 
   const uploadFile = useCallback(
@@ -186,13 +230,23 @@ export function useStudio() {
       const probe = document.createElement('video');
       probe.preload = 'metadata';
       probe.src = url;
-      const done = (dur: number) => {
-        ingest(file.name, Math.max(24, Math.min(600, dur || 120)), url, `${(file.size / 1e6).toFixed(1)} MB · local`);
+      const done = (dur: number, resolution?: string) => {
+        if (!dur) log('video metadata could not be probed — using a 120 s structural layout without picture', 'warn');
+        ingest(
+          file.name,
+          Math.max(24, Math.min(600, dur || 120)),
+          url,
+          `${(file.size / 1e6).toFixed(1)} MB · local`,
+          resolution,
+        );
       };
-      probe.onloadedmetadata = () => done(probe.duration);
-      probe.onerror = () => done(120);
+      probe.onloadedmetadata = () => {
+        const res = probe.videoWidth && probe.videoHeight ? `${probe.videoWidth} × ${probe.videoHeight}` : 'unmeasured';
+        done(probe.duration, res);
+      };
+      probe.onerror = () => done(0);
     },
-    [ingest],
+    [ingest, log],
   );
 
   /* --------------------------------------------------------- transport */
@@ -235,17 +289,31 @@ export function useStudio() {
     return () => cancelAnimationFrame(raf);
   }, [playing, project]);
 
-  // keep engine clips in sync with transport (both generative and library)
+  // Keep the monitor graph in sync with the transport. The active scene's
+  // procedural layer stack and every timeline clip are driven through the
+  // SAME voices + master chain the offline renderer uses, so play, meters
+  // and export all describe the same mix. The rAF monitor loop reads the
+  // refs below; they are refreshed in an effect (never during render) so
+  // per-frame state changes cannot re-subscribe the effect.
+  const activeLayersRef = useRef<Layer[]>([]);
+  const clipsRef = useRef<AudioClip[]>([]);
+  const timeRef = useRef(time);
+  useEffect(() => {
+    activeLayersRef.current = activeScene?.layers ?? [];
+    clipsRef.current = project?.clips ?? [];
+    timeRef.current = time;
+  });
   useEffect(() => {
     if (!playing || !project || !audioOn) return;
+    engine.start(activeLayersRef.current, clipsRef.current, timeRef.current);
     let raf = 0;
     const loop = () => {
-      engine.tickClips(project.clips ?? [], time);
+      engine.update(activeLayersRef.current, clipsRef.current, timeRef.current);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [playing, project, audioOn, time]);
+  }, [playing, project, audioOn, activeSceneId]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -558,7 +626,10 @@ export function useStudio() {
 
   const clearUnusedCache = useCallback(async () => {
     if (!project) return;
-    const removed = await soundCache.clearUnused([project.id]);
+    // Keep every blob the open project references — both via the ownership
+    // list and explicitly by cacheKey, so pre-ownership records survive too.
+    const keys = project.clips.map((c) => c.cacheKey).filter((k): k is string => !!k);
+    const removed = await soundCache.clearUnused([project.id], keys);
     log(`cache: removed ${removed} unused audio asset(s) — project files kept`, 'warn');
     setLibraryLoaded(false);
     void loadClipBuffers();
@@ -715,41 +786,31 @@ export function useStudio() {
 
   const regenLayer = useCallback(
     (sceneId: string, layerId: string) => {
-      setRegenerating((r) => ({ ...r, [layerId]: 0 }));
-      log('regen: queued synthesis variant', 'gpu');
-      const iv = window.setInterval(() => {
-        setRegenerating((r) => {
-          const p = (r[layerId] ?? 0) + 9 + Math.random() * 16;
-          if (p >= 100) {
-            window.clearInterval(iv);
-            setProject((cur) =>
-              cur
-                ? {
-                    ...cur,
-                    scenes: cur.scenes.map((s) =>
-                      s.id === sceneId ? { ...s, layers: s.layers.map((l) => (l.id === layerId ? regenerateLayer(l) : l)) } : s,
-                    ),
-                  }
-                : cur,
-            );
-            log('regen: variant accepted', 'ok');
-            const next = { ...r };
-            delete next[layerId];
-            return next;
-          }
-          return { ...r, [layerId]: p };
-        });
-      }, 180);
+      const scene = project?.scenes.find((s) => s.id === sceneId);
+      const l = scene?.layers.find((x) => x.id === layerId);
+      if (!scene || !l) return;
+      const next = regenerateLayer(l);
+      setProject((cur) =>
+        cur
+          ? {
+              ...cur,
+              scenes: cur.scenes.map((s) =>
+                s.id === sceneId ? { ...s, layers: s.layers.map((x) => (x.id === layerId ? next : x)) } : s,
+              ),
+            }
+          : cur,
+      );
+      log(`regenerate: ${next.name} · v${next.version} · seed ${next.seed} — synthesis parameters updated live`, 'ok');
     },
-    [log],
+    [project, log],
   );
 
   const regenScene = useCallback(
     (sceneId: string) => {
       const s = project?.scenes.find((x) => x.id === sceneId);
       if (!s) return;
-      log(`regen: full scene ${s.index} stack · ${s.layers.length} layers`, 'gpu');
-      s.layers.forEach((l, i) => later(() => regenLayer(sceneId, l.id), i * 200));
+      log(`regen: scene ${s.index} stack — ${s.layers.length} layer(s)`, 'info');
+      s.layers.forEach((l) => regenLayer(sceneId, l.id));
     },
     [project, regenLayer, log],
   );
@@ -857,7 +918,6 @@ export function useStudio() {
     jobs,
     analyzing,
     analyzeProgress,
-    regenerating,
     videoRef,
     loadDemo,
     uploadFile,
@@ -916,6 +976,62 @@ export function useStudio() {
     libraryLoaded,
     clipCount,
     providerStatuses: () => lib.providers().map((p) => p.status()),
+    // --- draft persistence -------------------------------------------------
+    savedAt,
+    saveState,
+    saveError,
+    hasSavedDraft,
+    saveNow: async () => {
+      if (!project) return;
+      try {
+        await persistProject(project, master);
+        setSavedAt(Date.now());
+        setHasSavedDraft(true);
+        setSaveState('saved');
+        setSaveError(null);
+        log(`project draft saved locally (${new Date().toLocaleTimeString()})`, 'ok');
+      } catch (e) {
+        setSaveState('error');
+        setSaveError((e as Error).message);
+        log(`save failed: ${(e as Error).message}`, 'warn');
+      }
+    },
+    /** Reopen the newest saved draft from the Uploader screen. */
+    resumeSaved: async () => {
+      try {
+        const snap = await loadLatestSnapshot();
+        if (!snap) return;
+        const { project: p, warnings } = await hydrateClips(snap.project);
+        engine.setMaster(snap.master);
+        setProject(p);
+        setActiveSceneId(p.scenes[0]?.id ?? null);
+        setMasterState(snap.master);
+        setTime(0);
+        setPlaying(false);
+        setSavedAt(snap.savedAt);
+        setHasSavedDraft(true);
+        setSaveState('saved');
+        log(`resumed project "${p.name}" from the local draft`, 'ok');
+        warnings.forEach((w) => log(w, 'warn'));
+        if (snap.hadLocalVideo && !p.videoUrl) {
+          log('the source video was a local file and cannot be restored after a reload — picture offline, audio and edits intact', 'warn');
+        }
+      } catch (e) {
+        log(`could not resume the saved project: ${(e as Error).message}`, 'warn');
+      }
+    },
+    /** Discard the saved draft (Close keeps it; this removes it permanently). */
+    discardSaved: async () => {
+      try {
+        const removed = await discardLatestSavedProject();
+        setSavedAt(null);
+        setHasSavedDraft(false);
+        setSaveState('idle');
+        log(removed ? 'saved project draft removed from this browser' : 'no saved project draft to remove', 'warn');
+      } catch (e) {
+        log(`could not remove the saved draft: ${(e as Error).message}`, 'warn');
+      }
+    },
     reset: () => {
       engine.stop();
       setProject(null);
@@ -926,6 +1042,7 @@ export function useStudio() {
       setSelectedClipId(null);
       setRange(null);
       setRetrieval({ busy: false, intent: null, result: null, error: null, lastAuto: null });
+      // the saved draft survives Close — the Uploader offers Resume
     },
   };
 }

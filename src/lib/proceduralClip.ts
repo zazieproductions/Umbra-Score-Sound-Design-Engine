@@ -101,7 +101,10 @@ export async function renderProceduralClip(
   const space = pickSpace(req.prompt);
   const tension = Math.min(1, Math.max(0.15, req.intensity ?? 0.62));
 
-  const base: Layer = addLayer(kind, space, tension, rootHz(req.key));
+  // The whole layer (not just the seed field) is derived from `seed` so a
+  // re-render of the stored request reproduces the same voice parameters —
+  // determinism is what makes hydration from a draft trustworthy.
+  const base: Layer = addLayer(kind, space, tension, rootHz(req.key), seed);
   const layer: Layer = { ...base, seed, muted: false, solo: false, gain: 0 };
 
   const OfflineCtor: typeof OfflineAudioContext =

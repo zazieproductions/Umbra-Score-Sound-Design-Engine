@@ -65,8 +65,8 @@ export function ScenesView({ studio }: { studio: Studio }) {
   return (
     <ViewShell>
       <Panel
-        title="Scene detection"
-        sub={`${project.scenes.length} shots segmented · ${project.fps} fps · optical-flow boundary model`}
+        title="Scene plan"
+        sub={`${project.scenes.length} scene blocks · ${project.fps} fps · deterministic local layout (backend shot detection not used for this project)`}
         right={
           <span className="chip tnum">
             {studio.readyCount}/{project.scenes.length} ready
@@ -146,13 +146,16 @@ export function PipelineView({ studio }: { studio: Studio }) {
   const { project } = studio;
   if (!project) return null;
 
+  /* What this pipeline actually is: a deterministic local plan plus live
+   * browser synthesis. Nothing here claims optical flow, CLIP or a remote
+   * cloud graph — those are not part of this runtime path. */
   const stages = [
-    { k: 'Ingest & probe', d: 'container demux, colour + fps probe, checksum', done: true },
-    { k: 'Shot segmentation', d: 'frame differential, flow clustering, cut refine', done: studio.readyCount > 0 },
-    { k: 'Semantic tagging', d: 'CLIP scene labels, motion energy, tension curve', done: studio.readyCount > 1 },
-    { k: 'Layer planning', d: 'assigns 6–9 layer classes, a musical key and a reverb space per scene', done: studio.readyCount > 1 },
-    { k: 'Orchestration & synthesis', d: 'Umbra procedural voices · 48 kHz layered Web Audio', done: !studio.analyzing },
-    { k: 'Conform & master', d: 'glue comp → tape drive → M/S widen → true-peak limit', done: !studio.analyzing },
+    { k: 'Ingest & probe', d: 'file name + duration read locally', done: !!project },
+    { k: 'Structural scene plan', d: 'deterministic timing, key and tension layout from reel length', done: studio.readyCount > 0 },
+    { k: 'Layer orchestration', d: 'procedural voice classes, reverb spaces and sync points per scene', done: studio.layerCount > 0 },
+    { k: 'Realtime synthesis', d: 'Web Audio voices — live while the monitor is on and playing', done: !studio.analyzing },
+    { k: 'Edit & mix', d: 'timeline clips, scene layers and master chain are editable', done: !studio.analyzing },
+    { k: 'Offline bounce', d: 'same DSP graph rendered to 24-bit WAV when you queue an export', done: !studio.analyzing },
   ];
 
   const kindTotals = KIND_ORDER.map((k) => ({
@@ -164,7 +167,7 @@ export function PipelineView({ studio }: { studio: Studio }) {
   return (
     <ViewShell>
       <div className="grid gap-3 lg:grid-cols-[1.15fr_1fr]">
-        <Panel title="Generation pipeline" sub="six-stage cloud graph, per-scene fan-out">
+        <Panel title="Generation pipeline" sub="local path: structural plan → live synthesis → offline bounce">
           <ol className="relative flex flex-col gap-3 pl-1">
             {stages.map((s, i) => (
               <li key={s.k} className="rise relative flex gap-3" style={{ animationDelay: `${i * 70}ms` }}>
@@ -518,7 +521,7 @@ export function SettingsView({ studio }: { studio: Studio }) {
             </p>
           </Panel>
 
-          <Panel title="Workspace" sub="local project state">
+          <Panel title="Workspace" sub="local project drafts · auto-saved to this browser">
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between border-b border-white/[0.05] pb-1.5">
                 <span className="text-[11px] text-dim">Generated clips</span>
@@ -528,8 +531,30 @@ export function SettingsView({ studio }: { studio: Studio }) {
                 <span className="text-[11px] text-dim">Layers resident</span>
                 <span className="tnum text-[11px] text-bone">{studio.layerCount}</span>
               </div>
+              <div className="flex items-center justify-between border-b border-white/[0.05] pb-1.5">
+                <span className="text-[11px] text-dim">Last draft save</span>
+                <span className="tnum text-[11px] text-bone">
+                  {studio.savedAt ? new Date(studio.savedAt).toLocaleTimeString([], { hour12: false }) : '—'}
+                </span>
+              </div>
               {studio.project && (
-                <button className="btn mt-1 text-ember/85 hover:text-ember" onClick={studio.reset}>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  <button className="btn flex-1 px-2 py-1.5" onClick={() => void studio.saveNow()} title="Write the current project draft to IndexedDB now">
+                    Save draft now
+                  </button>
+                  <button className="btn px-2 py-1.5 text-ember/85 hover:text-ember" onClick={() => void studio.discardSaved()} title="Delete the saved copy of this project from this browser">
+                    Discard saved
+                  </button>
+                </div>
+              )}
+              <p className="text-[9.5px] leading-relaxed text-dim">
+                Drafts persist project structure, clips, provenance and master settings in IndexedDB; audio blobs are cached
+                per project. Library and user sounds are reconnected from that cache on reload; deterministic procedural clips
+                are re-rendered from their stored seed. Local video files and session URLs cannot be restored — the log lists
+                anything that had to be rebuilt.
+              </p>
+              {studio.project && (
+                <button className="btn mt-1 text-ember/85 hover:text-ember" onClick={studio.reset} title="Close the project — the saved draft stays and can be resumed from the home screen">
                   <Trash2 size={12} /> Close project
                 </button>
               )}

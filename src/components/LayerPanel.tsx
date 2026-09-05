@@ -36,8 +36,6 @@ export function Slider({
 function LayerCard({ studio, sceneId, layer }: { studio: Studio; sceneId: string; layer: Layer }) {
   const [open, setOpen] = useState(false);
   const meta = KIND_META[layer.kind];
-  const prog = studio.regenerating[layer.id];
-  const busy = prog !== undefined;
   const live = studio.audioOn && studio.playing;
   const scene = studio.project?.scenes.find((s) => s.id === sceneId);
 
@@ -92,18 +90,6 @@ function LayerCard({ studio, sceneId, layer }: { studio: Studio; sceneId: string
         <LayerMeter id={layer.id} active={live && !layer.muted} />
       </div>
 
-      {busy && (
-        <div className="px-2.5 pb-2">
-          <div className="mb-1 flex justify-between">
-            <span className="eyebrow text-[8px] text-ember">diffusing</span>
-            <span className="tnum text-[9px] text-ash">{Math.round(prog)}%</span>
-          </div>
-          <div className="h-[3px] overflow-hidden rounded-full bg-white/10">
-            <div className="h-full rounded-full bg-gradient-to-r from-blood to-orchid transition-[width] duration-200" style={{ width: `${prog}%` }} />
-          </div>
-        </div>
-      )}
-
       {open && (
         <div className="border-t border-white/[0.06] bg-black/25 px-2.5 py-2.5">
           <p className="mb-2.5 text-[10px] leading-relaxed text-dim">{meta.blurb}</p>
@@ -143,7 +129,7 @@ function LayerCard({ studio, sceneId, layer }: { studio: Studio; sceneId: string
           </div>
 
           <div className="mt-2.5 flex items-center gap-1.5">
-            <button className="btn flex-1 px-2 py-1.5 text-[11px]" disabled={busy} onClick={() => studio.regenLayer(sceneId, layer.id)}>
+            <button className="btn flex-1 px-2 py-1.5 text-[11px]" onClick={() => studio.regenLayer(sceneId, layer.id)} title="New seed + nudged synthesis parameters — audible on the next play/audition">
               <RotateCw size={11} /> Regenerate
             </button>
             <button
@@ -157,7 +143,7 @@ function LayerCard({ studio, sceneId, layer }: { studio: Studio; sceneId: string
               <Trash2 size={11} />
             </button>
           </div>
-          <p className="tnum mt-2 text-[9px] text-dim">seed {layer.seed} · 48 kHz · 24-bit float</p>
+          <p className="tnum mt-2 text-[9px] text-dim">seed {layer.seed} · live 48 kHz float synthesis · bounces 24-bit PCM</p>
         </div>
       )}
     </div>
