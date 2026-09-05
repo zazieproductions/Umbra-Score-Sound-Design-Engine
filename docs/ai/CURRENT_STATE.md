@@ -117,9 +117,9 @@ alignment, export loudness conformance tests, docs drift checks.
 
 ## Last verified
 
-- **Date:** 2026-09-05 · **base commit:** `0d78a15` · **branch:**
-  `arena/01a072fd-umbra-score-sound-design-engin`
-- Frontend: `npm run verify` green (typecheck + eslint + 45 pass / 4 skip) ·
-  `npm run build` green · rendered QA 49/49 with the headless engine + ALSA stub
+- **Date:** 2026-09-05 · **branch:** `arena/01a073ad-umbra-score-sound-design-engin`
+- Frontend: `npm run verify` green (typecheck + eslint + 150 pass / 6 skip) ·
+  `npm run build` green
 - Backend: `pytest backend/tests` 91 passed, 2 skipped, no downloads
-- Runtime provider verification: none in this environment (see table above)
+- Runtime provider verification: none in this environment (see table above). X-CLIP
+  likewise NOT runtime-verified here — `scripts/verify_xclip.py` is the gate.
