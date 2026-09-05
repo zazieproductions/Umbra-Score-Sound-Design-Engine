@@ -17,6 +17,14 @@ numpy>=1.24
 # Model download from official distribution channels.
 huggingface-hub>=0.24.0
 
+# Integration credential vault: AES-256-GCM encryption at rest for the
+# Freesound (and future integration) credentials database. The key itself
+# comes from the server-only UMBRA_CREDENTIAL_ENCRYPTION_KEY env var.
+cryptography>=42.0.0
+
+# Optional at runtime (guarded import): loads a local .env for the backend.
+python-dotenv>=1.0.0
+
 # Optional but recommended: ffprobe-based video metadata in analysis/video.py
 # needs the `ffmpeg` binary on PATH, not a Python package.
 

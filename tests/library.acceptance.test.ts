@@ -28,11 +28,10 @@ import { freesoundToAsset, mapFreesoundLicense, type FsSound } from '../src/lib/
 import { rankCandidates, applyClapRerank, registerClapReranker } from '../src/lib/library/ranking';
 import { provenanceStore, userLibrary } from '../src/lib/library/cache';
 import { exportCreditsTxt, exportCreditsJson, ledgerFromClips } from '../src/lib/library/credits';
+import { EMPTY_FREESOUND_STATUS, type FreesoundIntegrationStatus, type FreesoundRuntime } from '../src/lib/library/freesoundBackend';
 import {
   HORROR_DRONE_TRANSFORM,
   NO_TRANSFORM,
-  EMPTY_FREESOUND_CREDS,
-  type FreesoundCredentials,
   type LicensePolicy,
   type LibraryAsset,
   type RetrievalIntent,
@@ -43,10 +42,24 @@ import {
 
 /* ------------------------------------------------------------ fixtures -- */
 
+/**
+ * The API key the (mocked) BACKEND holds. The browser must never see or
+ * send it — every assertion below treats it as a leak canary.
+ */
 const TOKEN = 'umbra-test-token-0000';
 
-function creds(over: Partial<FreesoundCredentials> = {}): FreesoundCredentials {
-  return { ...EMPTY_FREESOUND_CREDS, apiToken: TOKEN, ...over };
+/** Safe, secret-free integration runtime — what the browser actually knows. */
+function runtime(over: Partial<FreesoundIntegrationStatus> = {}): FreesoundRuntime {
+  return {
+    backendOnline: true,
+    status: {
+      ...EMPTY_FREESOUND_STATUS,
+      configured: true,
+      searchAvailable: true,
+      verification: 'verified',
+      ...over,
+    },
+  };
 }
 
 /** Minimal WAV header + 0.5s of silence so blob sizes are honest. */
@@ -111,12 +124,33 @@ function fsSound(over: Partial<FsSound> & { id: number }): FsSound {
   };
 }
 
-/** Route a Freesound search request to a canned fixture by query match. */
+/**
+ * Mock the Umbra backend's Freesound proxy (browser → /api/library/freesound)
+ * plus the public preview CDN, routing searches to canned fixtures.
+ *
+ * The mock enforces the security contract on every call: the browser request
+ * must carry NO credential — no token/api key in the URL, no Authorization
+ * header. The key the backend uses (TOKEN) is treated as a leak canary.
+ */
 function mockFreesoundSearch(routes: { q: RegExp; results: FsSound[] }[]): ReturnType<typeof vi.fn> {
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-    if (url.origin !== 'https://freesound.org') throw new Error(`unexpected origin ${url.origin}`);
-    if (url.pathname === '/apiv2/search/') {
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === 'string'
+        ? new URL(input, 'http://umbra.test')
+        : input instanceof URL
+          ? input
+          : new URL(input.url, 'http://umbra.test');
+    // SECURITY: no credential may appear in a browser request URL
+    for (const k of ['token', 'apiKey', 'api_key', 'client_secret', 'access_token', 'refresh_token']) {
+      if (url.searchParams.has(k)) throw new Error(`secret leaked into the browser request URL: ${k}`);
+    }
+    if (String(url).includes(TOKEN)) throw new Error('backend API key leaked into the browser request');
+    const headers = new Headers(init?.headers);
+    if (url.pathname.startsWith('/api/') && headers.has('Authorization')) {
+      throw new Error('credential leaked into the browser→backend request');
+    }
+    // the backend proxy: search
+    if (url.origin === 'http://umbra.test' && url.pathname === '/api/library/freesound/search') {
       const q = url.searchParams.get('query') ?? '';
       const route = routes.find((r) => r.q.test(q));
       const results = route?.results ?? [];
@@ -125,11 +159,16 @@ function mockFreesoundSearch(routes: { q: RegExp; results: FsSound[] }[]): Retur
         headers: { 'content-type': 'application/json' },
       });
     }
-    // preview downloads — return a tiny real WAV so blob sizes are truthful
-    if (url.pathname.includes('/data/previews/')) {
+    // the backend proxy: original-quality download (the backend holds the OAuth token)
+    if (url.origin === 'http://umbra.test' && /\/api\/library\/freesound\/sounds\/\d+\/download$/.test(url.pathname)) {
+      return new Response(wavBlob(2), { status: 200, headers: { 'content-type': 'audio/wav' } });
+    }
+    // preview downloads (public CDN, no credential involved) — a tiny real
+    // WAV so blob sizes are truthful
+    if (url.origin === 'https://freesound.org' && url.pathname.includes('/data/previews/')) {
       return new Response(wavBlob(0.5), { status: 200, headers: { 'content-type': 'audio/mpeg' } });
     }
-    throw new Error(`unmapped freesound url ${url.pathname}`);
+    throw new Error(`unmapped url ${url.origin}${url.pathname}`);
   });
   setFetchMock(fn as never);
   return fn;
@@ -191,7 +230,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     expect(door!.priority).toBeGreaterThanOrEqual(0.9);
   });
 
-  it('searches Freesound via the official /apiv2/search/ endpoint (token auth)', async () => {
+  it('searches Freesound through the backend proxy — no credential in the browser request', async () => {
     const fetchFn = mockFreesoundSearch([
       {
         q: /door/i,
@@ -209,7 +248,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
       },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'suggest' });
+    const svc = new RetrievalService(() => runtime(), { autoMode: 'suggest' });
     const ctx = scene({ spotting: [spotted()] });
     const intents = planScene(ctx, { density: 'normal' });
     const door = intents.find((i) => i.role === 'DOOR')!;
@@ -218,10 +257,11 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     expect(res.error).toBeNull();
     expect(res.candidates.length).toBeGreaterThan(0);
 
-    // the HTTP layer must have used the CURRENT endpoint with the token
-    const calledUrl = new URL(fetchFn.mock.calls[0][0] as string);
-    expect(calledUrl.pathname).toBe('/apiv2/search/');
-    expect(calledUrl.searchParams.get('token')).toBe(TOKEN);
+    // the browser called the UMBRA backend, never freesound.org, and the
+    // request carried no credential whatsoever (the mock would have thrown)
+    const calledUrl = new URL(fetchFn.mock.calls[0][0] as string, 'http://umbra.test');
+    expect(calledUrl.pathname).toBe('/api/library/freesound/search');
+    expect(calledUrl.searchParams.get('token')).toBeNull();
     expect(calledUrl.searchParams.get('query')).toMatch(/door/i);
     expect(calledUrl.searchParams.get('fields')).toContain('previews');
     expect(calledUrl.searchParams.get('fields')).toContain('license');
@@ -244,7 +284,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     const fetchFn = mockFreesoundSearch([
       { q: /door/i, results: [fsSound({ id: 9202, name: 'door_creak_02', tags: ['door'], duration: 1.5, score: 10 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const intent = planEvent(scene(), spotted({ id: 'ev-d', role: 'DOOR', time: 18.4 }));
     const res = await svc.search(intent);
     const asset = res.candidates[0].asset;
@@ -279,7 +319,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
         ],
       },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const ctx = scene({ spotting: [spotted({ id: 'ev-t1' })] });
     const intent = planEvent(ctx, spotted({ id: 'ev-t1' }));
 
@@ -348,7 +388,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
         ],
       },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const intent = planEvent(scene(), spotted());
     const res = await svc.search(intent);
     const clip = await svc.placeClip({ sceneId: 'sc-test', intent, candidate: res.candidates[0], start: 18.4, projectId: 'prj' });
@@ -418,7 +458,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
       { q: /drone/i, results: [fsSound({ id: 6305, name: 'low_dark_drone', tags: ['drone', 'low'], description: 'sustained low drone', duration: 40, score: 90 })] },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'suggest', density: 'normal' });
+    const svc = new RetrievalService(() => runtime(), { autoMode: 'suggest', density: 'normal' });
     const out = await svc.autoDesign(basement(), 'prj-t2', 'suggest');
 
     // SUGGEST: nothing is placed — this is the honest default
@@ -440,7 +480,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
     }
 
     // each search actually hit the API (not one chained mega-query)
-    const searchCalls = fetchFn.mock.calls.filter(([i]) => String(i).includes('/apiv2/search/'));
+    const searchCalls = fetchFn.mock.calls.filter(([i]) => String(i).includes('/api/library/freesound/search'));
     expect(searchCalls.length).toBe(out.suggestions.length);
   });
 
@@ -453,7 +493,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
       { q: /drone/i, results: [fsSound({ id: 6315, name: 'dark_drone', tags: ['drone'], description: 'dark drone', duration: 45, score: 95 })] },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'auto-full', density: 'normal', autoFullThreshold: 0.6 });
+    const svc = new RetrievalService(() => runtime(), { autoMode: 'auto-full', density: 'normal', autoFullThreshold: 0.6 });
     // user library has priority but is empty; use a fixture-only run
     const out = await svc.autoDesign(basement(), 'prj-t2b', 'auto-full');
 
@@ -489,7 +529,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
     expect(tone!.transform).toEqual(NO_TRANSFORM);
 
     // and the whole thing ran through real API calls
-    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/apiv2/search/')).length).toBeGreaterThanOrEqual(3);
+    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/api/library/freesound/search')).length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -498,7 +538,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
  * ==================================================================== */
 describe('T3 · mechanical recording → Umbra drone transform + provenance', () => {
   it('user library import keeps full metadata (never infers license from filename)', async () => {
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const file = new File([wavBlob(3.0)], 'factory_floor_01.wav', { type: 'audio/wav' });
     const rec = await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -519,7 +559,7 @@ describe('T3 · mechanical recording → Umbra drone transform + provenance', ()
     mockFreesoundSearch([
       { q: /machine|mechanical|engine/i, results: [fsSound({ id: 7701, name: 'generic_machine_buzz', tags: ['machine'], description: 'machine buzz', duration: 12, score: 90 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const file = new File([wavBlob(12)], 'my_distant_machinery_hum.wav', { type: 'audio/wav' });
     await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -549,7 +589,7 @@ describe('T3 · mechanical recording → Umbra drone transform + provenance', ()
     mockFreesoundSearch([
       { q: /machine|mechanical|engine/i, results: [fsSound({ id: 7702, name: 'other_machine', tags: ['machine'], duration: 10, score: 5 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const file = new File([wavBlob(12)], 'mech_room_capture_distant_machinery_hum.wav', { type: 'audio/wav' });
     await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -634,8 +674,8 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
         ],
       },
     ]);
-    const strict = new RetrievalService(() => creds(), { licensePolicy: { mode: 'strict', accepted: ['CC0', 'CC_BY'] } });
-    const personal = new RetrievalService(() => creds(), { licensePolicy: { mode: 'personal', accepted: ['CC0', 'CC_BY', 'CC_BY_NC'] } });
+    const strict = new RetrievalService(() => runtime(), { licensePolicy: { mode: 'strict', accepted: ['CC0', 'CC_BY'] } });
+    const personal = new RetrievalService(() => runtime(), { licensePolicy: { mode: 'personal', accepted: ['CC0', 'CC_BY', 'CC_BY_NC'] } });
 
     const intent: RetrievalIntent = { id: 'i', sceneId: 's', role: 'DRONE', query: 'drone', altQueries: [], time: null, offset: 0, durationFit: 'long', priority: 1, allowSilence: true, reason: 'test' };
     const strictRes = await strict.search(intent);
@@ -654,7 +694,7 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
     mockFreesoundSearch([
       { q: /door/i, results: [fsSound({ id: 8802, name: 'weird_door', tags: ['door'], license: 'Special Use', duration: 1.0, score: 100 })] },
     ]);
-    const svc = new RetrievalService(() => creds(), { autoMode: 'auto-safe', licensePolicy: { mode: 'custom', accepted: ['CC0', 'CC_BY'] } });
+    const svc = new RetrievalService(() => runtime(), { autoMode: 'auto-safe', licensePolicy: { mode: 'custom', accepted: ['CC0', 'CC_BY'] } });
     const ctx = scene({ spotting: [spotted({ id: 'ev-x', role: 'DOOR', time: 3 })] });
     const out = await svc.autoDesign(ctx, 'prj', 'auto-safe');
     expect(out.placed).toHaveLength(0);
@@ -665,24 +705,32 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
     setFetchMock((async () => {
       throw new Error('network unreachable');
     }) as never);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const intent = planEvent(scene(), spotted());
     const res = await svc.search(intent);
     expect(res.candidates).toHaveLength(0);
     expect(res.error).toMatch(/network unreachable|Freesound/);
   });
 
-  it('no token → provider reports not-ready and the search returns an honest error', async () => {
-    const svc = new RetrievalService(() => creds({ apiToken: '' }));
+  it('not configured on the backend → provider reports not-ready and the search returns an honest error', async () => {
+    const svc = new RetrievalService(() => runtime({ configured: false, searchAvailable: false, verification: null }));
     expect(svc.freesound.status().ready).toBe(false);
-    expect(svc.freesound.status().reason).toMatch(/token/i);
+    expect(svc.freesound.status().reason).toMatch(/not configured|backend/i);
     const res = await svc.search(planEvent(scene(), spotted()));
     expect(res.candidates).toHaveLength(0);
     expect(res.error).toBeTruthy();
   });
 
+  it('backend offline → provider reports honestly instead of pretending', async () => {
+    const svc = new RetrievalService(() => ({ status: EMPTY_FREESOUND_STATUS, backendOnline: false }));
+    const st = svc.freesound.status();
+    expect(st.ready).toBe(false);
+    expect(st.online).toBe(false);
+    expect(st.reason).toMatch(/backend/i);
+  });
+
   it('preview and original quality are never conflated; original needs OAuth', async () => {
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService(() => runtime());
     const asset = freesoundToAsset(fsSound({ id: 9901, name: 'q_check', tags: [] }), 'preview', 'fs-9901-preview');
     expect(asset.quality).toBe('preview');
 
@@ -690,17 +738,22 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
     expect(original).toBeInstanceOf(Error);
     expect((original as Error).message).toMatch(/OAuth/i);
 
-    // with a bearer token the original download uses the right endpoint
+    // with OAuth connected the original download goes through the backend —
+    // the browser sends no Authorization header; the backend holds the token
     const bearerFn = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/download/')) return new Response(wavBlob(2), { status: 200, headers: { 'content-type': 'audio/wav' } });
+      if (url.includes('/sounds/9901/download')) return new Response(wavBlob(2), { status: 200, headers: { 'content-type': 'audio/wav' } });
       throw new Error(`unexpected ${url}`);
     });
     setFetchMock(bearerFn as never);
-    const svc2 = new RetrievalService(() => creds({ accessToken: 'oauth-bearer-1', expiresAt: Date.now() + 3600_000 }));
+    const svc2 = new RetrievalService(() =>
+      runtime({ oauthAvailable: true, oauthConfigured: true, expiresAt: Date.now() + 3600_000 }),
+    );
     const orig = await svc2.fetchOriginal(asset);
     expect(orig.cacheKey).toBe('fs-9901-original');
-    expect(String(bearerFn.mock.calls[0][0])).toContain('/sounds/9901/download/');
+    expect(String(bearerFn.mock.calls[0][0])).toContain('/api/library/freesound/sounds/9901/download');
+    const firstInit = bearerFn.mock.calls[0][1] as RequestInit | undefined;
+    expect(new Headers(firstInit?.headers).has('Authorization')).toBe(false);
   });
 });
 

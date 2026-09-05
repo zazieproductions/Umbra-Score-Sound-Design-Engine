@@ -17,6 +17,8 @@
  * ==================================================================== */
 
 import { FreesoundProvider } from './freesound';
+import type { FreesoundRuntime } from './freesoundBackend';
+import { OFFLINE_FREESOUND_RUNTIME } from './freesoundBackend';
 import { UserLibraryProvider } from './userLibrary';
 import { PixabayAssistedProvider } from './pixabay';
 import { soundCache, provenanceStore, settingsStore, shortId } from './cache';
@@ -25,7 +27,6 @@ import { planScene, planSoundEvents, type PlanEventsOptions } from './planner';
 import type { SceneSoundContext, SoundEventCandidate } from './types';
 import type {
   AutoPlacementReport,
-  FreesoundCredentials,
   LibraryAsset,
   LibrarySettings,
   ProvenanceEntry,
@@ -82,11 +83,16 @@ export class RetrievalService {
   readonly pixabay: PixabayAssistedProvider;
   settings: LibrarySettings;
 
+  /**
+   * @param getFreesoundRuntime safe, secret-free integration state plus
+   *        backend reachability — the provider forwards it to the backend
+   *        proxy, which holds the actual credentials.
+   */
   constructor(
-    private getCreds: () => FreesoundCredentials,
+    getFreesoundRuntime: () => FreesoundRuntime = () => OFFLINE_FREESOUND_RUNTIME,
     settings?: Partial<LibrarySettings>,
   ) {
-    this.freesound = new FreesoundProvider(getCreds);
+    this.freesound = new FreesoundProvider(getFreesoundRuntime);
     this.userLibrary = new UserLibraryProvider();
     this.pixabay = new PixabayAssistedProvider();
     this.settings = { ...DEFAULT_LIBRARY_SETTINGS, ...(settings ?? {}) };

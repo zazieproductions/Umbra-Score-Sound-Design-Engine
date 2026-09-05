@@ -33,6 +33,7 @@ import type {
   ProviderStatus,
 } from '../lib/library/types';
 import { LICENSE_CLASS_LABELS, ROLE_LABELS } from '../lib/library/types';
+import { freesoundLadder } from '../lib/library/freesoundBackend';
 import { provenanceStore, soundCache } from '../lib/library/cache';
 
 /* ------------------------------------------------------------- shell -- */
@@ -529,7 +530,7 @@ function ProviderCards({ studio }: { studio: Studio }) {
               <span className="text-[11.5px] font-medium text-bone">{s.label}</span>
               {s.provider === 'freesound' && (
                 <span className="chip ml-auto border-white/10 text-[8.5px]">
-                  {studio.creds.apiToken ? <Lock size={8} /> : <X size={8} />} token {studio.creds.apiToken ? 'set' : 'missing'}
+                  {studio.freesoundOnline ? <Lock size={8} /> : <X size={8} />} {freesoundLadder({ status: studio.freesoundStatus, backendOnline: studio.freesoundOnline }).label.toLowerCase()}
                 </span>
               )}
             </div>

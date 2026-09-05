@@ -173,7 +173,6 @@ export const provenanceStore = {
 /* -------------------------------------------------- favorites ------- */
 
 const FAV_KEY = 'umbra.library.favorites';
-const CRED_KEY = 'umbra.library.freesound.creds.v1';
 const SETTINGS_KEY = 'umbra.library.settings.v1';
 
 function readJson<T>(key: string, fallback: T): T {
@@ -213,22 +212,29 @@ export const favoritesStore = {
 
 /* --------------------------------------------------- credentials ---- */
 
-/** Pure localStorage persistence — never leaves the browser, never committed. */
-export const credsStore = {
-  load<T>(key = CRED_KEY, fallback: T): T {
-    return readJson(key, fallback);
-  },
-  save(key: string, value: unknown): void {
-    writeJson(key, value);
-  },
-  clear(key: string): void {
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      /* noop */
-    }
-  },
-};
+/*
+ * Freesound credentials are backend-managed (encrypted at rest in the
+ * Umbra backend). Nothing here may persist them — the only credential-
+ * related storage left is a one-time cleanup of the key older versions
+ * wrote to localStorage, so secrets never linger in browsers that were
+ * configured before the backend integration existed.
+ */
+
+const LEGACY_FREESOUND_CRED_KEY = 'umbra.library.freesound.creds.v1';
+
+/** Remove any Freesound secret left in browser storage by older versions. */
+export function purgeLegacyFreesoundSecrets(): void {
+  try {
+    localStorage.removeItem(LEGACY_FREESOUND_CRED_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  try {
+    globalThis.sessionStorage?.removeItem(LEGACY_FREESOUND_CRED_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
 
 export const settingsStore = {
   load<T>(fallback: T): T {

@@ -1,3 +1,10 @@
+# Local environment — NEVER committed. Holds real secrets
+# (UMBRA_CREDENTIAL_ENCRYPTION_KEY, UMBRA_FREESOUND_* credentials).
+# Variable names are documented in .env.example; values stay local.
+.env
+.env.*
+!.env.example
+
 # Logs
 logs
 *.log

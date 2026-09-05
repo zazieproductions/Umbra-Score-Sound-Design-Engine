@@ -29,11 +29,24 @@ import { useGeneration } from './useGeneration';
 import type { GenerateRequest } from './providers';
 // Library imports — preserve PR7 retrieval completely
 import { RetrievalService, type AutoPlacementDetail } from './library/service';
-import { soundCache, provenanceStore, credsStore, settingsStore, shortId } from './library/cache';
+import { soundCache, provenanceStore, settingsStore, shortId, purgeLegacyFreesoundSecrets } from './library/cache';
 import { exportCreditsJson, exportCreditsTxt, downloadText } from './library/credits';
 import { analyzeVideoUrl, condenseEvents, type EventEnvironment } from './library/videoAnalysis';
-import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundCredentials, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
-import { EMPTY_FREESOUND_CREDS, DEFAULT_LIBRARY_SETTINGS } from './library/types';
+import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
+import { DEFAULT_LIBRARY_SETTINGS } from './library/types';
+import {
+  EMPTY_FREESOUND_STATUS,
+  fetchFreesoundStatus,
+  configureFreesound as configureFreesoundApi,
+  disconnectFreesound as disconnectFreesoundApi,
+  verifyFreesound as verifyFreesoundApi,
+  startFreesoundOAuth,
+  exchangeFreesoundOAuth,
+  refreshFreesoundOAuth,
+  type FreesoundConfigurePayload,
+  type FreesoundIntegrationStatus,
+  type FreesoundRuntime,
+} from './library/freesoundBackend';
 import { tc } from './format';
 
 export interface LogLine {
@@ -74,15 +87,20 @@ export function useStudio() {
   const [hasSavedDraft, setHasSavedDraft] = useState(false);
 
   /* -------------------------------------------------- sound library -- */
-  const [creds, setCreds] = useState<FreesoundCredentials>(() =>
-    credsStore.load('umbra.library.freesound.creds.v1', EMPTY_FREESOUND_CREDS),
-  );
+  // Freesound is a backend-managed integration: the browser keeps only the
+  // secret-free status ladder plus backend reachability. No credential
+  // ever enters React state, localStorage, or IndexedDB.
+  const [freesoundStatus, setFreesoundStatus] = useState<FreesoundIntegrationStatus>(EMPTY_FREESOUND_STATUS);
+  const [freesoundOnline, setFreesoundOnline] = useState(false);
+  const freesoundRuntimeRef = useRef<FreesoundRuntime>({ status: EMPTY_FREESOUND_STATUS, backendOnline: false });
+  // stable accessor for the retrieval service — reads the ref at call time
+  const getFreesoundRuntime = useCallback((): FreesoundRuntime => freesoundRuntimeRef.current, []);
   const [libSettings, setLibSettingsState] = useState<LibrarySettings>(() =>
     settingsStore.load<LibrarySettings>(DEFAULT_LIBRARY_SETTINGS),
   );
   const serviceRef = useRef<RetrievalService | null>(null);
   // eslint-disable-next-line react-hooks/refs -- lazy service init: created once, never reassigned
-  if (!serviceRef.current) serviceRef.current = new RetrievalService(() => creds, libSettings);
+  if (!serviceRef.current) serviceRef.current = new RetrievalService(getFreesoundRuntime, libSettings);
   const [retrieval, setRetrieval] = useState<RetrievalState>({
     busy: false,
     intent: null,
@@ -113,17 +131,66 @@ export function useStudio() {
     });
   }, []);
 
-  const saveCreds = useCallback((patch: Partial<FreesoundCredentials>) => {
-    setCreds((c) => {
-      const next = { ...c, ...patch };
-      credsStore.save('umbra.library.freesound.creds.v1', next);
-      return next;
-    });
-  }, []);
-
   const log = useCallback((text: string, level: LogLine['level'] = 'info') => {
     setLogs((prev) => [{ id: `lg${logSeq++}`, at: Date.now(), level, text }, ...prev].slice(0, 120));
   }, []);
+
+  /* -------------------------------------- freesound integration ----- */
+
+  const applyFreesoundStatus = useCallback((status: FreesoundIntegrationStatus) => {
+    freesoundRuntimeRef.current = { status, backendOnline: true };
+    setFreesoundStatus(status);
+    setFreesoundOnline(true);
+  }, []);
+
+  /** Submit credentials once — they are stored encrypted in the backend. */
+  const configureFreesound = useCallback(
+    async (payload: FreesoundConfigurePayload) => {
+      const r = await configureFreesoundApi(payload);
+      applyFreesoundStatus(r.status);
+      log(
+        `freesound integration: credentials stored on the backend (encrypted at rest) — fields: ${Object.keys(payload).join(', ') || 'none'}`,
+        'ok',
+      );
+      return r;
+    },
+    [applyFreesoundStatus, log],
+  );
+
+  /** Disconnect — deletes every stored Freesound secret from the backend. */
+  const disconnectFreesound = useCallback(async () => {
+    const r = await disconnectFreesoundApi();
+    applyFreesoundStatus(r.status);
+    log('freesound integration: disconnected — stored credentials deleted from the backend', 'warn');
+    return r;
+  }, [applyFreesoundStatus, log]);
+
+  /** Test Connection — a real authenticated request to freesound.org. */
+  const testFreesoundConnection = useCallback(async () => {
+    const r = await verifyFreesoundApi();
+    applyFreesoundStatus(r.status);
+    if (r.verification.verified) {
+      log(`freesound integration: connection verified — ${r.verification.checks.join('; ')}`, 'ok');
+    } else {
+      log(`freesound integration: verification failed — ${r.verification.error ?? 'unknown error'}`, 'warn');
+    }
+    return r;
+  }, [applyFreesoundStatus, log]);
+
+  /** Reconnect — opens the backend-built OAuth2 authorization URL. */
+  const reconnectFreesound = useCallback(async () => {
+    const { authorizeUrl } = await startFreesoundOAuth();
+    window.open(authorizeUrl, '_blank', 'noopener');
+    log('freesound oauth2: authorization page opened — approve access, then return here', 'info');
+  }, [log]);
+
+  const refreshFreesoundToken = useCallback(async () => {
+    const r = await refreshFreesoundOAuth();
+    applyFreesoundStatus(r.status);
+    log('freesound oauth2: access token refreshed', 'ok');
+    return r;
+  }, [applyFreesoundStatus, log]);
+
 
   /* Mount-only sync from IndexedDB/localStorage into local state — intentionally runs once. */
   /* eslint-disable react-hooks/set-state-in-effect -- mount-only external-store sync */
@@ -132,6 +199,84 @@ export function useStudio() {
     try { setFavorites(JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]').length); } catch { setFavorites(0); }
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* Freesound integration, mount-only: purge any secret older versions left
+   * in browser storage, learn the (secret-free) status from the backend, and
+   * complete the OAuth2 redirect if freesound.org sent us back a code+state.
+   * All state updates happen in async continuations, never synchronously. */
+  useEffect(() => {
+    let cancelled = false;
+    purgeLegacyFreesoundSecrets();
+
+    void (async () => {
+      try {
+        const status = await fetchFreesoundStatus();
+        if (cancelled) return;
+        freesoundRuntimeRef.current = { status, backendOnline: true };
+        setFreesoundStatus(status);
+        setFreesoundOnline(true);
+      } catch {
+        if (!cancelled) {
+          freesoundRuntimeRef.current = { status: EMPTY_FREESOUND_STATUS, backendOnline: false };
+          setFreesoundOnline(false);
+        }
+      }
+    })();
+
+    // OAuth2 callback: the authorization page redirected back with
+    // ?code=…&state=… (or an error). The code+state go to the backend,
+    // which validates the single-use state and exchanges them server-side.
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const oauthError = params.get('error');
+    if (code && state) {
+      void (async () => {
+        try {
+          const { status } = await exchangeFreesoundOAuth(code, state);
+          if (cancelled) return;
+          freesoundRuntimeRef.current = { status, backendOnline: true };
+          setFreesoundStatus(status);
+          setFreesoundOnline(true);
+          log(
+            status.oauthAvailable
+              ? `freesound oauth2: connected${status.user ? ` as ${status.user}` : ''} — original-quality downloads enabled`
+              : 'freesound oauth2: exchange completed, but no valid access token was stored',
+            status.oauthAvailable ? 'ok' : 'warn',
+          );
+        } catch (e) {
+          log(`freesound oauth2: ${(e as Error).message}`, 'warn');
+        } finally {
+          // strip the one-time code/state from the URL — they must not
+          // linger in history or be re-posted on reload
+          try {
+            const u = new URL(window.location.href);
+            u.searchParams.delete('code');
+            u.searchParams.delete('state');
+            u.searchParams.delete('error');
+            window.history.replaceState({}, '', u.toString());
+          } catch {
+            /* URL manipulation unavailable */
+          }
+        }
+      })();
+    } else if (oauthError) {
+      void (async () => {
+        log(`freesound oauth2: authorization was denied (${oauthError})`, 'warn');
+        try {
+          const u = new URL(window.location.href);
+          u.searchParams.delete('error');
+          window.history.replaceState({}, '', u.toString());
+        } catch {
+          /* URL manipulation unavailable */
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [log]);
 
   useEffect(
     () => () => {
@@ -1126,8 +1271,13 @@ export function useStudio() {
     repaintClip,
     regenerateClip,
     // sound library — preserved from PR7
-    creds,
-    saveCreds,
+    freesoundStatus,
+    freesoundOnline,
+    configureFreesound,
+    disconnectFreesound,
+    testFreesoundConnection,
+    reconnectFreesound,
+    refreshFreesoundToken,
     libSettings,
     setSettingsPatch,
     setLicensePolicy,
