@@ -1,72 +1,274 @@
 # UMBRA·SCORE
 
-**Cinematic Score & Sound Design Engine** — a fully client-side synthesizer that turns a video cut into a layered, Hollywood-grade film score. No samples, no cloud: every stem is synthesized and mixed in-browser through the Web Audio API, then bounced to a real 24-bit / 48 kHz WAV.
+**Hybrid Procedural + Generative Audio Workstation**
 
-> "Score it like a Hollywood mix. Frame by frame."
+A cinematic score and sound design engine combining:
 
-## What it generates
+1. **UMBRA PROCEDURAL** — Deterministic browser-based synthesis
+2. **Pretrained Generative Models** — Optional neural audio generation
 
-UMBRA analyzes a reel into scenes (tension, motion, sync hits), assigns each scene a musical key, then scores it with **17 layer classes**:
+> "Score it like a Hollywood mix. Frame by frame. Now with AI-powered sound generation."
 
-| Family | Layers |
-| --- | --- |
-| Beds | Drone Bed · Sub Pressure · Ambience · Whisper Texture |
-| Orchestra | String Section · Choir Pad · Braam · Brass Stab |
-| Rhythm / Tension | Heart Pulse · Tension Tick · Taiko / Percussion |
-| Transitions | Riser · Downlifter · Whoosh Pass |
-| Detail | Foley · Stinger · Impact |
+---
 
-Pitched layers resolve to a shared scene key, so strings, choir, brass and braams sit in the same harmonic space — the whole cut plays like one composed score, not a wall of unrelated drones.
-
-## The audio chain
+## Architecture Overview
 
 ```
-voices ─┬─► channel strip (HP · bell · air · pan · Haas width)
-        │      └─► sends → room / scoring stage / cathedral convolvers
-        │
-music layers → musicSum → duck (hit sidechain) ─┐
-hit layers   → hitSum ──────────────────────────┤
-sub layers   → sub bus (LP · octave · 46 Hz res)┤
-                                               ▼
-tension macro → glue comp → tape drive → tilt EQ → M/S widen
-     → parallel exciter → brickwall → true-peak lookahead limiter
+VIDEO / USER PROMPT
+        ↓
+UMBRA ANALYSIS + SPOTTING (PySceneDetect)
+        ↓
+PROVIDER ROUTER
+        ↓
+┌────────────────────┐
+│ UMBRA PROCEDURAL   │  ← Deterministic DSP (browser)
+└────────────────────┘
+┌────────────────────┐
+│ Stable Audio Open  │  ← Text → audio (optional)
+└────────────────────┘
+┌────────────────────┐
+│ MMAudio            │  ← Video → audio (optional)
+└────────────────────┘
+┌────────────────────┐
+│ CLAP               │  ← Semantic search (optional)
+└────────────────────┘
+        ↓
+REAL AUDIO FILES / BUFFERS
+        ↓
+UMBRA AUDIO CLIPS
+        ↓
+TIMELINE
+        ↓
+HUMAN EDITING
+        ↓
+UMBRA DSP / MIX
+        ↓
+WAV EXPORT
 ```
 
-Every render then runs a **post master**:
+---
 
-1. **ITU-R BS.1770 loudness measurement** (K-weighting, 400 ms blocks, absolute + relative gating) → conformed to **-16 LUFS**.
-2. **Lookahead true-peak limiting** (5 ms sliding-window max, instant attack, smooth release) → **-1 dBTP** ceiling.
-3. 24-bit PCM encode (TPDF-dithered at 16-bit).
+## Two Audio Engines
 
-Key mixing moves for the theatrical feel:
+### UMBRA PROCEDURAL (Built-in)
 
-- **Hit ducking** — impacts, stingers, braams, brass and taiko sidechain the music bed, so every hit lands with real pump.
-- **Sub-harmonic LFE** — layered fundamental + fifth + sub-octave, rectified octave reinforcement, and a resonant 46 Hz shelf so the weight survives small speakers.
-- **Immersive space** — procedural stereo impulse responses with early reflections and decorrelated tails, Haas width, drifting ambience pans, and a reverse-bloom convolver for pre-swell tails.
-- **Dramatic dynamic range** — a tension macro rides the whole mix, scenes swell toward their tension peak, and equal-power crossfades with a sub "brake" polish every seam.
+The original deterministic synthesis engine running entirely in the browser via Web Audio API.
 
-## Running it
+**Characteristics:**
+- Instant generation (no inference wait)
+- Fully deterministic (same seed = same output)
+- Zero model downloads
+- Works offline
+- GPU-agnostic
+
+**Supported layers:**
+- Drone Bed, Sub Pressure, Ambience, Whisper Texture
+- String Section, Choir Pad, Braam, Brass Stab
+- Heart Pulse, Tension Tick, Taiko / Percussion
+- Riser, Downlifter, Whoosh Pass
+- Foley, Stinger, Impact
+
+### Pretrained Generative Models (Optional)
+
+ML-powered audio generation requires the Python backend.
+
+| Provider | Input | Output | Model Size |
+|----------|-------|--------|------------|
+| **Stable Audio Open** | Text prompt | Audio file | ~1.5 GB |
+| **MMAudio** | Video + optional prompt | Synchronized audio | ~2 GB |
+| **CLAP** | Text query | Similarity ranking | ~1 GB |
+
+---
+
+## Quick Start
+
+### Frontend Only (Procedural Engine)
 
 ```bash
 npm install
-npm run dev      # local dev server with HMR
-npm run build    # typecheck + production bundle
-npm run lint     # eslint
-npm test         # sound-library retrieval acceptance tests (mocked Freesound API)
+npm run dev
 ```
 
-Load the demo reel or drop a video (MP4 / MOV / ProRes / WebM, up to 4K). Use the **Mix** panel to ride the master bus, solo/mute/audition layers, and bounce stems; **Export** renders the full score to WAV in-browser.
+Open http://localhost:5173
 
-## Project layout
+### With ML Backend (Hybrid Mode)
+
+```bash
+# Terminal 1: Frontend
+npm install
+npm run dev
+
+# Terminal 2: Python Backend
+cd backend
+pip install -r requirements.txt  # or: python scripts/setup_models.py --core
+python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Installing ML Models
+
+```bash
+# Install all ML dependencies
+python backend/scripts/setup_models.py --all
+
+# Or install individually
+python backend/scripts/setup_models.py --stable-audio
+python backend/scripts/setup_models.py --mmaudio
+python backend/scripts/setup_models.py --clap
+python backend/scripts/setup_models.py --pyscenedetect
+```
+
+---
+
+## Frontend Project Structure
 
 ```
-src/lib/
-  types.ts       layer kinds, scenes, project model, metadata
-  dsp.ts         master bus, channel strips, reverbs, ducking
-  voices.ts      per-layer synthesis graphs (17 classes)
-  generate.ts    scene/key planning and layer generation
-  render.ts      offline render + loudness/true-peak post master
-  audio.ts       realtime monitoring engine
-  useStudio.ts   React state + transport + export orchestration
-src/components/  UI (viewer, timeline, mixer, exports, assets…)
+src/
+├── lib/
+│   ├── types.ts        # Layer kinds, scenes, project model
+│   ├── dsp.ts          # Master bus, channel strips, reverbs
+│   ├── voices.ts       # Per-layer synthesis (17 classes)
+│   ├── generate.ts     # Scene/key planning, layer generation
+│   ├── render.ts       # Offline render + loudness/limiter
+│   ├── audio.ts        # Realtime monitoring engine
+│   └── useStudio.ts    # React state, transport, export
+├── components/         # UI components
+└── App.tsx            # Main application
 ```
+
+## Backend Project Structure
+
+```
+backend/
+├── app.py              # FastAPI application
+├── providers/
+│   ├── base.py         # Abstract provider interface
+│   ├── registry.py     # Provider registration system
+│   ├── procedural_bridge.py  # UMBRA procedural metadata
+│   ├── stable_audio.py       # Stable Audio Open integration
+│   ├── mmaudio.py            # MMAudio integration
+│   ├── clap.py               # CLAP semantic search
+│   └── pyscenedetect.py      # Scene detection
+├── analysis/
+│   ├── scenes.py       # Scene detection wrapper
+│   ├── video.py        # Video analysis utilities
+│   └── waveform.py     # Waveform generation
+├── services/
+│   ├── model_manager.py   # Model downloads, caching
+│   ├── audio_store.py     # Generated audio storage
+│   └── jobs.py            # Job tracking
+├── schemas/
+│   ├── providers.py    # Provider schemas
+│   ├── generation.py   # Generation request/response
+│   └── analysis.py     # Scene detection schemas
+└── scripts/
+    ├── setup_models.py    # Model installation
+    └── verify_environment.py  # Environment check
+```
+
+---
+
+## API Endpoints
+
+### Health & Status
+- `GET /health` — Health check
+- `GET /api/providers` — List providers
+- `GET /api/system/device` — GPU/CPU detection
+
+### Audio Generation
+- `POST /api/generate` — Generate audio
+- `GET /api/audio/{id}` — Get audio metadata
+- `GET /api/audio/{id}/download` — Download audio file
+- `GET /api/audio/{id}/waveform` — Get waveform peaks
+
+### Semantic Search
+- `POST /api/search` — Search audio by text
+- `POST /api/index` — Add audio to search index
+
+### Scene Detection
+- `POST /api/scenes/detect` — Detect video scenes
+
+### Jobs
+- `GET /api/jobs` — List jobs
+- `GET /api/jobs/{id}` — Get job status
+- `POST /api/jobs/{id}/cancel` — Cancel job
+
+---
+
+## Hardware Requirements
+
+| Mode | Minimum | Recommended |
+|------|---------|-------------|
+| Procedural Only | Any modern browser | Chrome/Firefox/Safari |
+| With ML Backend | 8GB RAM, CPU | 16GB RAM, NVIDIA GPU or Apple Silicon |
+
+### GPU Support
+
+The backend automatically detects available hardware:
+
+1. **NVIDIA CUDA** — Full acceleration
+2. **Apple MPS** — Metal GPU (M1/M2/M3)
+3. **CPU** — Fallback (slower)
+
+---
+
+## License & Third-Party Models
+
+See:
+- [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md) — Integrated model documentation
+- [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) — License details
+- [docs/FINE_TUNING.md](docs/FINE_TUNING.md) — Future fine-tuning guide
+
+**Important:** This project is for personal, experimental, noncommercial use. Always verify that your use case complies with the licenses of integrated models.
+
+---
+
+## Development
+
+```bash
+# Frontend
+npm install
+npm run dev        # Development
+npm run build     # Production build
+npm run lint      # Linting
+npm test          # Sound-library retrieval acceptance tests (mocked Freesound API)
+
+# Backend
+cd backend
+pip install -r requirements.txt
+python -m uvicorn app:app --reload
+
+# Verify environment
+python scripts/verify_environment.py
+```
+
+---
+
+## What's New in v0.2
+
+- **Hybrid Architecture** — Procedural synthesis + ML models
+- **Stable Audio Open** — Text-to-audio generation
+- **MMAudio** — Video-conditioned audio
+- **CLAP** — Semantic audio search
+- **PySceneDetect** — Real video scene detection
+- **Python Backend** — FastAPI for ML inference
+- **Provider System** — Pluggable audio generation providers
+
+---
+
+## Known Limitations
+
+- ML models require separate installation
+- GPU acceleration depends on hardware availability
+- Some providers may have different capabilities than described
+- Fine-tuning is not yet implemented
+
+---
+
+## Contributing
+
+This is an experimental project. Contributions are welcome but should maintain:
+
+1. The procedural engine as a first-class citizen
+2. Real audio output (no simulated/fake audio)
+3. Honest capability reporting
+4. License compliance
