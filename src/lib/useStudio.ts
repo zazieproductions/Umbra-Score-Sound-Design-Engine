@@ -51,6 +51,7 @@ export function useStudio() {
     settingsStore.load<LibrarySettings>(DEFAULT_LIBRARY_SETTINGS),
   );
   const serviceRef = useRef<RetrievalService | null>(null);
+  // eslint-disable-next-line react-hooks/refs -- lazy service init: created once, never reassigned
   if (!serviceRef.current) serviceRef.current = new RetrievalService(() => creds, libSettings);
   const [retrieval, setRetrieval] = useState<RetrievalState>({
     busy: false,
@@ -94,10 +95,13 @@ export function useStudio() {
     setLogs((prev) => [{ id: `lg${logSeq++}`, at: Date.now(), level, text }, ...prev].slice(0, 120));
   }, []);
 
+  /* Mount-only sync from IndexedDB/localStorage into local state — intentionally runs once. */
+  /* eslint-disable react-hooks/set-state-in-effect -- mount-only external-store sync */
   useEffect(() => {
     void provenanceStore.list().then(() => setLibraryLoaded(true));
     try { setFavorites(JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]').length); } catch { setFavorites(0); }
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(
     () => () => {
@@ -397,6 +401,8 @@ export function useStudio() {
     setLibraryLoaded(true);
   }, [project?.clips]);
 
+  /* Re-sync decoded clip buffers whenever the timeline clip set changes. */
+  /* eslint-disable-next-line react-hooks/set-state-in-effect -- clip-set sync, not render-derived state */
   useEffect(() => { void loadClipBuffers(); }, [loadClipBuffers]);
 
   const runSearch = useCallback(async (intent: RetrievalIntent, page = 1) => {
@@ -449,7 +455,7 @@ export function useStudio() {
       transform: target.transform!, asset: candidate.asset, cacheKey: candidate.asset.cacheKey, intentId: target.intentId ?? '', match: candidate.match,
     };
     const sc = lib.applyReplacement(target as unknown as SoundClip, tmpSc);
-    const { blob, cacheKey } = await lib.ensurePreview(candidate.asset);
+    const { cacheKey } = await lib.ensurePreview(candidate.asset);
     await soundCache.touchProjects(cacheKey, project.id);
     const ac = await libraryClipToUnified({ ...sc, cacheKey, asset: candidate.asset });
     // keep position/gain/pan etc from target

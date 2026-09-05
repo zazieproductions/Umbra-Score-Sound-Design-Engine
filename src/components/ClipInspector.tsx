@@ -54,7 +54,7 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
       <div className="flex items-start gap-2">
         <span
           className="mt-[3px] h-2.5 w-2.5 shrink-0 rounded-[3px]"
-          style={{ background: (meta as any).color, boxShadow: `0 0 8px ${(meta as any).color}88` }}
+          style={{ background: meta.color, boxShadow: `0 0 8px ${meta.color}88` }}
         />
         <div className="min-w-0 flex-1">
           <input
@@ -63,7 +63,7 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
             className="w-full bg-transparent text-[12px] font-semibold text-bone outline-none"
           />
           <p className="tnum text-[9.5px] text-dim">
-            {(meta as any).label} · {tc(clip.start)} → {tc(clip.start + clip.duration)} · {clip.duration.toFixed(2)}s
+            {meta.label} · {tc(clip.start)} → {tc(clip.start + clip.duration)} · {clip.duration.toFixed(2)}s
             {clip.version > 1 ? ` · v${clip.version}` : ''}
             {clip.match != null ? ` · match ${Math.round(clip.match * 100)}%` : ''}
             {clip.role ? ` · ${ROLE_LABELS[clip.role as SoundRole] ?? String(clip.role)}` : ''}
@@ -103,17 +103,17 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
             <span className="text-[8px] text-dim/70">nondestructive · original kept</span>
           </span>
           <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-            <Slider label="Playback rate" value={clip.transform.playbackRate} min={0.2} max={2.5} step={0.01} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, playbackRate: v } } as any)} />
-            <Slider label="Pitch" value={clip.transform.pitch} min={-24} max={24} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v} st`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, pitch: v } } as any)} />
-            <Slider label="Gain trim" value={clip.transform.gainDb} min={-24} max={6} step={0.5} fmt={(v) => `${v > 0 ? '+' : ''}${v} dB`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, gainDb: v } } as any)} />
-            <Slider label="Reverb send" value={clip.transform.reverb} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, reverb: v } } as any)} />
-            <Slider label="Low-pass" value={clip.transform.lowpassHz ?? 20000} min={200} max={20000} step={50} fmt={(v) => (v >= 19900 ? 'off' : `${v} Hz`)} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, lowpassHz: v >= 19900 ? null : v } } as any)} />
-            <Slider label="Slow modulation" value={clip.transform.slowModulate} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, slowModulate: v } } as any)} />
+            <Slider label="Playback rate" value={clip.transform.playbackRate} min={0.2} max={2.5} step={0.01} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, playbackRate: v } })} />
+            <Slider label="Pitch" value={clip.transform.pitch} min={-24} max={24} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v} st`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, pitch: v } })} />
+            <Slider label="Gain trim" value={clip.transform.gainDb} min={-24} max={6} step={0.5} fmt={(v) => `${v > 0 ? '+' : ''}${v} dB`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, gainDb: v } })} />
+            <Slider label="Reverb send" value={clip.transform.reverb} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, reverb: v } })} />
+            <Slider label="Low-pass" value={clip.transform.lowpassHz ?? 20000} min={200} max={20000} step={50} fmt={(v) => (v >= 19900 ? 'off' : `${v} Hz`)} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, lowpassHz: v >= 19900 ? null : v } })} />
+            <Slider label="Slow modulation" value={clip.transform.slowModulate} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.patchClip(clip.id, { transform: { ...clip.transform!, slowModulate: v } })} />
           </div>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
-            <button className={`chip ${clip.transform.reverse ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, reverse: !clip.transform!.reverse } } as any)}>reverse {clip.transform.reverse ? 'on' : 'off'}</button>
-            <button className={`chip ${clip.transform.loop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, loop: !clip.transform!.loop } } as any)}>loop {clip.transform.loop ? 'on' : 'off'}</button>
-            <button className={`chip ${clip.transform.crossfadeLoop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, crossfadeLoop: !clip.transform!.crossfadeLoop } } as any)}>crossfade loop {clip.transform.crossfadeLoop ? 'on' : 'off'}</button>
+            <button className={`chip ${clip.transform.reverse ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, reverse: !clip.transform!.reverse } })}>reverse {clip.transform.reverse ? 'on' : 'off'}</button>
+            <button className={`chip ${clip.transform.loop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, loop: !clip.transform!.loop } })}>loop {clip.transform.loop ? 'on' : 'off'}</button>
+            <button className={`chip ${clip.transform.crossfadeLoop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => studio.patchClip(clip.id, { transform: { ...clip.transform!, crossfadeLoop: !clip.transform!.crossfadeLoop } })}>crossfade loop {clip.transform.crossfadeLoop ? 'on' : 'off'}</button>
           </div>
         </div>
       )}
@@ -183,16 +183,16 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
         <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
           {(
             [
-              ['provider', (m as any).provider],
-              ['model', (m as any).model],
-              ['seed', (m as any).seed],
-              ['bpm', (m as any).bpm],
-              ['key', (m as any).key && (m as any).mode ? `${(m as any).key} ${(m as any).mode}` : (m as any).key],
-              ['time sig', (m as any).timeSignature],
-              ['duration', (m as any).duration != null ? `${Number((m as any).duration).toFixed(2)}s` : null],
-              ['reference', (m as any).referenceAudioId],
-              ['source', (m as any).sourceAudioId],
-              ['task', (m as any).task],
+              ['provider', m.provider],
+              ['model', m.model],
+              ['seed', m.seed],
+              ['bpm', m.bpm],
+              ['key', m.key && m.mode ? `${m.key} ${m.mode}` : m.key],
+              ['time sig', m.timeSignature],
+              ['duration', m.duration != null ? `${Number(m.duration).toFixed(2)}s` : null],
+              ['reference', m.referenceAudioId],
+              ['source', m.sourceAudioId],
+              ['task', m.task],
               ['audio id', clip.audioId],
               ['cacheKey', clip.cacheKey],
             ] as [string, unknown][]
@@ -207,7 +207,7 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
               </div>
             ))}
         </dl>
-        {typeof (m as any).prompt === 'string' && <p className="mt-2 text-[9.5px] leading-relaxed text-dim">{(m as any).prompt}</p>}
+        {typeof m.prompt === 'string' && <p className="mt-2 text-[9.5px] leading-relaxed text-dim">{m.prompt}</p>}
         {clip.asset?.tags?.length ? <p className="mt-1 text-[9px] text-dim/70">tags: {clip.asset.tags.slice(0,8).join(', ')}</p> : null}
       </details>
     </div>
