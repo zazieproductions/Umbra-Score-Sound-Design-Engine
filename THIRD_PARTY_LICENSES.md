@@ -77,6 +77,7 @@ Declared in `package.json`, installed from npm.
 | **lucide-react** | Icons | ISC |
 | **framer-motion** | Animation | MIT |
 | **react-router-dom** | Routing | MIT |
+| **fflate** | ZIP assembly for the stem delivery package (audio stored, docs deflated) | MIT |
 | **ESLint** and plugins | Linting | MIT |
 
 ---

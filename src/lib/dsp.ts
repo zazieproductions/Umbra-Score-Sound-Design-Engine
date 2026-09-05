@@ -11,10 +11,15 @@ import type { LayerKind } from './types';
  *           │                                                          │
  *   music layers ─► musicSum ─► duck (hit sidechain) ──────────────────┤
  *   hit layers   ─► hitSum ────────────────────────────────────────────┤
- *   sub layers   ─► sub bus ─► LP + octave + resonance + drive ────────┤
+ *   sub layers   ─► sub bus ─► LP + octave + resonance + drive ─► subOut┤
  *                                                                     ▼
  *   dynamics (tension macro) ─► glue comp ─► tape drive ─► tilt EQ
  *        ─► mid/side widener ─► (+ parallel exciter) ─► brickwall ─► out
+ *
+ *  Stem delivery note: the sub-chain feeds the mix through `subOut`, and the
+ *  glue/tape/exciter/limiter stages can be unwired by buildMaster(opts).
+ *  A stem render = same graph, restricted source set, subOut gated per stem
+ *  and masterFx off — so Σ stems nulls against the pre-master mix exactly.
  * ==================================================================== */
 
 export interface MasterParams {
@@ -272,6 +277,10 @@ export interface MasterChain {
   hitSum: GainNode;
   duckGain: GainNode;
   subBus: GainNode;
+  /** Gate for the (nonlinear) sub-chain output. Unity for the monitor and the
+   *  master; stem passes silence it so the sub-chain energy is owned by the
+   *  dedicated SUB_LFE stem and never counted twice. */
+  subOut: GainNode;
   dynamics: GainNode;
   sendRoom: GainNode;
   sendHall: GainNode;
@@ -282,12 +291,33 @@ export interface MasterChain {
   loud: AnalyserNode;
   out: GainNode;
   params: MasterParams;
+  /** Whether the shared nonlinear bus stages (glue, tape, exciter, limiter)
+   *  are wired in. `false` = pre-master stem topology (exact-summable). */
+  masterFx: boolean;
   setParams(p: Partial<MasterParams>, when: number, glide: number): void;
   /** dip the music bed under a hit — theatrical "pump" */
   duck(when: number, depth: number, attack?: number, release?: number): void;
 }
 
-export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality: 'live' | 'render' = 'live'): MasterChain {
+export interface MasterBuildOpts {
+  /**
+   * When false, the master-bus *nonlinear* stages (glue compressor, tape
+   * saturation, parallel exciter, brickwall limiter) are not wired into the
+   * signal path. Linear stages (tilt EQ, M/S width, output gain) remain.
+   * This is the stem-delivery topology: every stem runs the same linear
+   * processing, so summing stems reconstructs the pre-master mix exactly.
+   * Default true = exactly what the monitor and the master bounce use.
+   */
+  masterFx?: boolean;
+}
+
+export function buildMaster(
+  ctx: BaseAudioContext,
+  params: MasterParams,
+  quality: 'live' | 'render' = 'live',
+  opts: MasterBuildOpts = {},
+): MasterChain {
+  const masterFxEnabled = opts.masterFx !== false;
   const p: MasterParams = { ...params };
   const noise = makeNoise(ctx, 5, 20240);
 
@@ -319,12 +349,16 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   subDrive.oversample = '4x';
   const subGain = gainNode(ctx, 1);
   const subRes = biquad(ctx, 'peaking', 46, 0.9, 2.5); // resonant weight (tamed by setParams)
+  // subOut gates the sub-chain into the mix. Unity by default, so the
+  // monitor path is bit-identical to before; stem passes set it to 0 and a
+  // dedicated SUB_LFE pass renders the chain for exactly one stem.
+  const subOut = gainNode(ctx, 1);
   subBus.connect(subLP);
   subLP.connect(subHP);
   subHP.connect(subDrive);
   subDrive.connect(subGain);
   subGain.connect(subRes);
-  subRes.connect(sum);
+  subRes.connect(subOut);
 
   // psychoacoustic octave-up so the weight survives small speakers
   const octBP = biquad(ctx, 'bandpass', 78, 1.1);
@@ -336,7 +370,8 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   octBP.connect(oct);
   oct.connect(octHP);
   octHP.connect(octGain);
-  octGain.connect(sum);
+  octGain.connect(subOut);
+  subOut.connect(sum);
 
   /* --- reverb buses ----------------------------------------------------- */
   const mk = (o: IROpts, hp: number) => {
@@ -454,17 +489,30 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   const loud = ctx.createAnalyser();
   loud.fftSize = 2048;
 
-  sum.connect(headroom);
+  sum.connect(headroom); // linear −6 dB working headroom: shared by ALL passes
   headroom.connect(dynamics);
-  dynamics.connect(glue);
-  glue.connect(satIn);
+  if (masterFxEnabled) {
+    dynamics.connect(glue);
+    glue.connect(satIn);
+  } else {
+    // stem topology: skip glue/tape/exciter — shared nonlinear bus
+    // processing must never be baked twice. Linear stages stay.
+    dynamics.connect(lowShelf);
+  }
   satMix.connect(lowShelf);
   lowShelf.connect(mudCut);
   mudCut.connect(airShelf);
   airShelf.connect(split);
-  merge.connect(dcBlock);
-  dcBlock.connect(limiter);
-  limiter.connect(out);
+  if (masterFxEnabled) {
+    merge.connect(dcBlock);
+    dcBlock.connect(limiter);
+    limiter.connect(out);
+  } else {
+    // stems keep DC/subsonic hygiene (linear, sum-preserving) but never the
+    // brickwall — headroom is the mix's decision, taken once at the master.
+    merge.connect(dcBlock);
+    dcBlock.connect(out);
+  }
   out.connect(spec);
   out.connect(loud);
   out.connect(ctx.destination);
@@ -519,6 +567,7 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
     hitSum,
     duckGain,
     subBus,
+    subOut,
     dynamics,
     sendRoom: room.send,
     sendHall: hall.send,
@@ -529,6 +578,7 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
     loud,
     out,
     params: p,
+    masterFx: masterFxEnabled,
     setParams,
     duck,
   };

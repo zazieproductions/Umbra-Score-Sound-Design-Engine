@@ -19,6 +19,7 @@ import { KIND_META, KIND_ORDER, SPACES, type LayerKind, type SceneStatus } from 
 import { DEMO_ASSETS, addLayer } from '../lib/generate';
 import { bytes, tc } from '../lib/format';
 import { MasterStrip } from './RightPanel';
+import { PostDeliveryPanel } from './PostDelivery';
 
 
 /* ------------------------------------------------------------------ shell */
@@ -374,6 +375,8 @@ export function ExportsView({ studio }: { studio: Studio }) {
 
   return (
     <ViewShell>
+      <PostDeliveryPanel studio={studio} />
+
       <Panel
         title="HD export"
         sub="real offline bounces rendered in-browser through the full DSP chain"

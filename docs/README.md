@@ -22,6 +22,9 @@ Start with the question you are trying to answer.
   capability honesty, status vocabulary, runtime-verification rules.
 - [`architecture/PROJECT_MODEL.md`](architecture/PROJECT_MODEL.md) — canonical
   domain types: Project, Scene, AudioClip, provenance, and where each lives.
+- [`architecture/DELIVERY.md`](architecture/DELIVERY.md) — stem delivery:
+  one clock/span, stem taxonomy, reconstruction tolerance, package + manifest,
+  manual DAW acceptance checklist.
 
 ## I want to build / change something
 

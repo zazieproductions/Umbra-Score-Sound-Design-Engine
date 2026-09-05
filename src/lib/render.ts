@@ -1,9 +1,23 @@
 import { buildMaster, type MasterParams } from './dsp';
-import { buildVoice } from './voices';
+import { buildVoice, type Voice } from './voices';
 import { mulberry32 } from './prng';
 import { clipBufferOffset, clipEnd, loadClipBuffer, scheduleClip } from './clips';
 import { KIND_META, type AudioClip, type Layer, type Project, type Scene } from './types';
+import { sceneDuckEvents } from './export/stemPlan';
 import { analyzeFloat, integratedLufs, truePeakLinear, type QualityReport } from './quality';
+
+/**
+ * Optional selection applied while scheduling procedural layers.
+ * Used by the stem renderer to restrict a render pass to one bus without
+ * forking the scheduling code — monitor, master bounce and every stem share
+ * this single implementation.
+ */
+export interface ScheduleSelection {
+  /** false = the layer is not scheduled in this pass (duck automation still applies) */
+  includeLayer?: (scene: Scene, layer: Layer) => boolean;
+  /** called after a voice's strip is configured — lets a pass rewire/gate its outputs */
+  afterVoice?: (scene: Scene, layer: Layer, voice: Voice) => void;
+}
 
 /** Static fader target for a layer — mirrors applyStrip() in voices.ts. */
 function faderTarget(l: Layer, tension: number): number {
@@ -41,7 +55,8 @@ export interface RenderOpts {
   onProgress?: (p: number) => void;
 }
 
-const TARGET_LUFS = -16;
+/** Delivery target for the MASTER file only. Stems are never conformed. */
+export const TARGET_LUFS = -16;
 const CURVE_N = 256;
 
 function fadeInCurve(target: number): Float32Array {
@@ -56,17 +71,32 @@ function fadeOutCurve(from: number): Float32Array {
   return c;
 }
 
-/** Schedule every scene's layers into an offline graph. */
-function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaster>, scenes: Scene[], total: number) {
+/**
+ * Schedule every scene's layers into an offline graph.
+ *
+ * Exported for stem delivery: the master bounce and every stem pass run this
+ * exact scheduling code, differing only in `sel` — the shared-graph
+ * invariant extends unchanged to delivery (ADR-0005).
+ */
+export function schedule(
+  ctx: OfflineAudioContext,
+  master: ReturnType<typeof buildMaster>,
+  scenes: Scene[],
+  total: number,
+  sel?: ScheduleSelection,
+) {
   const XF = 1.1; // crossfade at scene boundaries
+
+  // polished seam: duck the music bed a touch as each new scene enters.
+  // sceneDuckEvents() is the single authoritative list — the stem plan feeds
+  // the same events to its passes, so master and every stem pump identically
+  // and Σ stems stays an exact reconstruction.
+  for (const d of sceneDuckEvents(scenes, total)) master.duck(d.at, d.depth, d.attack, d.release);
 
   for (const scene of scenes) {
     const start = Math.max(0, scene.start);
     const end = Math.min(total, scene.end);
     if (end - start < 0.05) continue;
-
-    // polished seam: duck the music bed a touch as each new scene enters
-    if (start > 0.05) master.duck(start, 0.16, 0.01, 0.6);
 
     // Tension macro — mirror the live monitor (audio.ts setTension). Without
     // this the offline bounce leaves the dynamics gain at unity and exports
@@ -78,6 +108,7 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
     for (const raw of scene.layers) {
       const layer: Layer = { ...raw, muted: raw.muted || (anySolo && !raw.solo) };
       if (layer.muted) continue;
+      if (sel?.includeLayer && !sel.includeLayer(scene, layer)) continue;
 
       const voice = buildVoice(master, layer);
       const inAt = Math.max(0, start - XF * 0.5);
@@ -85,6 +116,7 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
 
       // set every strip parameter (pan / sends / eq / width) statically
       voice.update(layer, scene.tension, 0, 0);
+      sel?.afterVoice?.(scene, layer, voice);
 
       // dynamics: tension shapes the fader, giving real dramatic range
       const target = Math.max(0.0005, faderTarget(layer, scene.tension));
@@ -137,9 +169,10 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
  * is re-generated at export time and nothing is approximated.
  *
  * Returns the clips that were actually placed, so the caller can report
- * honestly if one failed to decode.
+ * honestly if one failed to decode. Exported so stem passes reuse the exact
+ * placement maths (window clamping, buffer-rate offsets, ≤0.02 s skip).
  */
-async function scheduleClips(
+export async function scheduleClipsInto(
   ctx: OfflineAudioContext,
   master: ReturnType<typeof buildMaster>,
   clips: AudioClip[],
@@ -258,7 +291,8 @@ function lookaheadLimit(data: Float32Array, fs: number, ceilingDb: number): Floa
  * to -16 LUFS would lift the noise floor and destroy the intentional
  * negative space, so below SILENCE_LUFS_DB we skip the makeup gain.
  */
-function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: number | null) {
+/** Exported for stem delivery: the MASTER pass conforms; stems never do. */
+export function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: number | null) {
   const fs = buffer.sampleRate;
   const numCh = Math.min(2, buffer.numberOfChannels);
   const chans: Float32Array[] = [];
@@ -299,6 +333,15 @@ function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: numb
   const peakDb = peak > 1e-7 ? 20 * Math.log10(peak) : -70;
   const truePeakDb = truePeak > 1e-7 ? 20 * Math.log10(truePeak) : -70;
   return { chans, lufs, peakDb, truePeakDb };
+}
+
+/**
+ * BS.1770 integrated loudness (K-weighted, gated) — the quality.ts meter,
+ * re-exported so stem delivery can *report* LUFS on every file without
+ * *normalising* anything. Stems must never be independently mastered.
+ */
+export function measureLufs(chans: Float32Array[], fs: number): number {
+  return integratedLufs(chans, fs);
 }
 
 export function encodeWav(chans: Float32Array[], sampleRate: number, bitDepth: 16 | 24): Blob {
@@ -391,7 +434,7 @@ export async function renderScore(
   // Generated clips ride the same master chain as the procedural voices.
   const windowStart = offset;
   const windowEnd = offset + span;
-  const clipResult = await scheduleClips(ctx, master, project.clips ?? [], windowStart, windowEnd);
+  const clipResult = await scheduleClipsInto(ctx, master, project.clips ?? [], windowStart, windowEnd);
 
   opts.onProgress?.(8);
   const buffer = await ctx.startRendering();
@@ -438,7 +481,7 @@ export async function renderClipStem(
   const master = buildMaster(ctx, masterParams, 'render');
 
   const solo: AudioClip = { ...clip, start: 0, muted: false, solo: false };
-  const result = await scheduleClips(ctx, master, [solo], 0, total);
+  const result = await scheduleClipsInto(ctx, master, [solo], 0, total);
   if (result.placed.length === 0) {
     throw new Error(`could not decode audio for "${clip.name}"`);
   }
