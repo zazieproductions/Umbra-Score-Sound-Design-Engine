@@ -15,7 +15,7 @@ interface Live {
  * Realtime monitoring engine. Keeps a pool of voices matching the active
  * scene, drives event scheduling with lookahead, and exposes metering.
  */
-export class HorrorEngine {
+export class ScoreEngine {
   ctx: AudioContext | null = null;
   master: MasterChain | null = null;
   private live = new Map<string, Live>();
@@ -51,8 +51,8 @@ export class HorrorEngine {
   setTension(t: number) {
     this.tension = t;
     if (!this.master || !this.ctx) return;
-    // dynamic range macro: quiet scenes sit back, peaks lean in
-    const g = 0.42 + t * 0.72;
+    // dynamic range macro: quiet scenes sit back, peaks lean in hard
+    const g = 0.34 + t * 0.92;
     this.master.dynamics.gain.setTargetAtTime(g, this.ctx.currentTime, 0.6);
   }
 
@@ -231,4 +231,4 @@ export class HorrorEngine {
   }
 }
 
-export const engine = new HorrorEngine();
+export const engine = new ScoreEngine();

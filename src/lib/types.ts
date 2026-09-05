@@ -4,11 +4,16 @@ export type LayerKind =
   | 'ambience'
   | 'texture'
   | 'strings'
+  | 'choir'
   | 'foley'
   | 'pulse'
+  | 'tick'
   | 'riser'
+  | 'downlifter'
   | 'whoosh'
   | 'braam'
+  | 'brass'
+  | 'percussion'
   | 'stinger'
   | 'impact';
 
@@ -27,6 +32,7 @@ export interface Layer {
   tone: number;      // 0 .. 1     spectral centre
   intensity: number; // 0 .. 1     drive / density / rate
   attack: number;    // 0 .. 1     transient softness
+  root: number;      // Hz · musical key centre shared across the scene
   muted: boolean;
   solo: boolean;
   seed: number;
@@ -93,40 +99,48 @@ export const KIND_META: Record<LayerKind, KindMeta> = {
     label: 'Drone Bed',
     color: '#7d6bff',
     short: 'DRN',
-    blurb: 'Five-voice detuned minor cluster, breathing filter, orchestral weight.',
-    trim: 0.3,
+    blurb: 'Eight-voice detuned minor cluster with sub-octave anchor and airy shimmer, breathing filter.',
+    trim: 0.2,
     event: false,
   },
   sub: {
     label: 'Sub Pressure',
     color: '#5847d6',
     short: 'SUB',
-    blurb: 'Infrasonic bed with rectified octave reinforcement — theatrical LFE.',
-    trim: 0.62,
+    blurb: 'Layered infrasonic bed — fundamental, fifth and sub-octave with resonant 46 Hz weight for theatrical LFE.',
+    trim: 0.5,
     event: false,
   },
   ambience: {
     label: 'Ambience',
     color: '#4b8f9a',
     short: 'AMB',
-    blurb: 'Pink-noise room tone through a resonant three-band bank, wide stereo.',
-    trim: 0.22,
+    blurb: 'Three-band resonant room tone plus low rumble and air band, slowly drifting across the stereo field.',
+    trim: 0.16,
     event: false,
   },
   texture: {
     label: 'Whisper Texture',
     color: '#a86bd6',
     short: 'TEX',
-    blurb: 'Formant-filtered breath layer, drifting vowel bank, close-mic intimacy.',
-    trim: 0.24,
+    blurb: 'Formant-filtered breath layer with a drifting vowel bank and close-mic intimacy.',
+    trim: 0.18,
     event: false,
   },
   strings: {
-    label: 'String Cluster',
+    label: 'String Section',
     color: '#c0a3e6',
     short: 'STR',
-    blurb: 'Sul-ponticello ensemble, dissonant cluster, fast tremolo bowing.',
+    blurb: 'Four-section ensemble — basses, celli, violas, violins — legato swells, vibrato and spiccato stabs.',
     trim: 0.24,
+    event: false,
+  },
+  choir: {
+    label: 'Choir Pad',
+    color: '#7fb6e0',
+    short: 'CHR',
+    blurb: 'Airy vowel choir through a formant bank, slow attack and cathedral bloom.',
+    trim: 0.2,
     event: false,
   },
   foley: {
@@ -134,23 +148,39 @@ export const KIND_META: Record<LayerKind, KindMeta> = {
     color: '#b9a37e',
     short: 'FOL',
     blurb: 'Three-part transients — click, body, tail — with per-hit randomisation.',
-    trim: 0.44,
+    trim: 0.4,
     event: true,
   },
   pulse: {
     label: 'Heart Pulse',
     color: '#c01033',
     short: 'PLS',
-    blurb: 'Two-beat cardiac driver with sub thump and chest resonance.',
-    trim: 0.5,
+    blurb: 'Two-beat cardiac driver with sub thump and chest resonance locked to gait.',
+    trim: 0.4,
+    event: true,
+  },
+  tick: {
+    label: 'Tension Tick',
+    color: '#b7b0c9',
+    short: 'TCK',
+    blurb: 'Accelerating clock tick that tightens with tension — the classic dread meter.',
+    trim: 0.22,
     event: true,
   },
   riser: {
     label: 'Riser',
     color: '#e0663f',
     short: 'RIS',
-    blurb: 'Accelerating noise + pitch swell that resolves on the cut.',
-    trim: 0.34,
+    blurb: 'Accelerating noise + pitch swell that resolves on the cut with a sub drop.',
+    trim: 0.3,
+    event: true,
+  },
+  downlifter: {
+    label: 'Downlifter',
+    color: '#3fa9a0',
+    short: 'DWN',
+    blurb: 'Reverse pitch-fall and noise sweep into a sub drop that lands on the cut.',
+    trim: 0.3,
     event: true,
   },
   whoosh: {
@@ -158,31 +188,47 @@ export const KIND_META: Record<LayerKind, KindMeta> = {
     color: '#6fb3c0',
     short: 'WSH',
     blurb: 'Doppler noise sweep travelling across the stereo field.',
-    trim: 0.32,
+    trim: 0.28,
     event: true,
   },
   braam: {
     label: 'Braam',
     color: '#d8a24a',
     short: 'BRM',
-    blurb: 'Stacked brass cluster with rasp drive and reverse pre-bloom.',
+    blurb: 'Stacked brass cluster with octave-down doubling, rasp drive and reverse pre-bloom.',
     trim: 0.4,
+    event: true,
+  },
+  brass: {
+    label: 'Brass Stab',
+    color: '#f0c060',
+    short: 'BRS',
+    blurb: 'Marcato horn stabs with rasp drive, pitch-dip attack and sub weight — theatrical accents.',
+    trim: 0.34,
+    event: true,
+  },
+  percussion: {
+    label: 'Taiko / Percussion',
+    color: '#c9824f',
+    short: 'PER',
+    blurb: 'Deep taiko hits, rim transients and chest thump layered for battle weight.',
+    trim: 0.44,
     event: true,
   },
   stinger: {
     label: 'Stinger',
     color: '#ff3b5c',
     short: 'STG',
-    blurb: 'Metallic FM crack, sub drop and reverse swell aligned to the cut.',
-    trim: 0.5,
+    blurb: 'Metallic FM crack, shriek band, sub drop and reverse swell aligned to the cut.',
+    trim: 0.44,
     event: true,
   },
   impact: {
     label: 'Impact',
     color: '#ff6a3d',
     short: 'IMP',
-    blurb: 'Cinema boom — sub sweep, distorted mid thwack, cathedral tail.',
-    trim: 0.58,
+    blurb: 'Layered cinema boom — pre-thud, sub sweep, distorted mid thwack, ring and air burst, cathedral tail.',
+    trim: 0.5,
     event: true,
   },
 };
@@ -193,17 +239,22 @@ export const KIND_ORDER: LayerKind[] = [
   'ambience',
   'texture',
   'strings',
+  'choir',
   'foley',
   'pulse',
+  'tick',
   'riser',
+  'downlifter',
   'whoosh',
   'braam',
+  'brass',
+  'percussion',
   'stinger',
   'impact',
 ];
 
 export const SPACES: { id: SpaceId; label: string; note: string }[] = [
   { id: 'room', label: 'Room', note: '0.85 s · tight early reflections' },
-  { id: 'hall', label: 'Scoring stage', note: '2.6 s · orchestral hall' },
+  { id: 'hall', label: 'Scoring stage', note: '3.1 s · orchestral hall' },
   { id: 'cathedral', label: 'Cathedral', note: '5.6 s · long diffuse tail' },
 ];

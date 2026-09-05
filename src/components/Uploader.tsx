@@ -3,9 +3,9 @@ import { Film, Sparkles, UploadCloud, Cpu, ShieldCheck, Waypoints } from 'lucide
 import type { Studio } from '../lib/useStudio';
 
 const STEPS = [
-  { icon: Waypoints, t: 'Shot boundary detection', d: 'Frame-differential + optical-flow segmentation at 24 fps.' },
-  { icon: Cpu, t: 'Multi-layer synthesis', d: 'DREADNET generates drone, sub, foley, texture and stinger stems per scene.' },
-  { icon: ShieldCheck, t: 'Conform & deliver', d: 'Loudness-normalised master, stems, and HD muxed video export.' },
+  { icon: Waypoints, t: 'Shot boundary detection', d: 'Frame-differential + optical-flow segmentation, tension and motion curves per cut.' },
+  { icon: Cpu, t: 'Layered orchestration', d: 'Strings, choir, brass, taiko, drones, sub pressure and foley scored to the scene key.' },
+  { icon: ShieldCheck, t: 'Conform & deliver', d: '-16 LUFS loudness-normalised master, true-peak limited stems and HD export.' },
 ];
 
 export default function Uploader({ studio }: { studio: Studio }) {
@@ -18,15 +18,16 @@ export default function Uploader({ studio }: { studio: Studio }) {
       <div className="relative w-full max-w-[820px]">
         <div className="rise mb-7 text-center" style={{ animationDelay: '40ms' }}>
           <span className="chip mx-auto mb-4 border-ember/30 bg-blood/10 text-ember">
-            <Sparkles size={10} /> DREADNET v3 · Horror Audio Engine
+            <Sparkles size={10} /> UMBRA SCORE ENGINE · Cinematic Composer
           </span>
           <h1 className="font-display text-[38px] font-extrabold leading-[1.05] tracking-[-0.03em] text-bone sm:text-[52px]">
-            Score the fear.
+            Score it like a Hollywood mix.
             <span className="block bg-gradient-to-r from-ember via-orchid to-violet bg-clip-text text-transparent">Frame by frame.</span>
           </h1>
           <p className="mx-auto mt-3.5 max-w-[520px] text-[13.5px] leading-relaxed text-ash">
-            Drop a cut. UMBRA analyses every scene, then synthesises a synchronised horror sound package — drones, sub pressure,
-            whisper textures, foley and stingers — ready for HD delivery.
+            Drop a cut. UMBRA analyses every scene and scores it like a theatrical soundtrack — full string sections, choir,
+            brass and taiko layered over deep sub pressure, immersive convolution spaces, hit-ducked dynamics and polished
+            transitions — ready for HD delivery.
           </p>
         </div>
 
@@ -99,7 +100,7 @@ export default function Uploader({ studio }: { studio: Studio }) {
         </div>
 
         <div className="rise mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5" style={{ animationDelay: '540ms' }}>
-          {['48 kHz / 24-bit', '7 layer classes', 'stem + master delivery', 'frame-accurate sync', 'no watermark'].map((t) => (
+          {['48 kHz / 24-bit', '17 layer classes', 'true-peak -1 dBTP', '-16 LUFS master', 'stem + master delivery', 'frame-accurate sync'].map((t) => (
             <span key={t} className="eyebrow text-[8.5px]">
               {t}
             </span>

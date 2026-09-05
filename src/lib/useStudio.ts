@@ -79,7 +79,7 @@ export function useStudio() {
           setProject((cur) =>
             cur ? { ...cur, scenes: cur.scenes.map((x) => (x.id === s.id ? { ...x, status: 'generating' } : x)) } : cur,
           );
-          log(`dreadnet: scene ${s.index} · synthesising ${s.layers.length} layers into ${s.layers[0]?.space ?? 'hall'} space`, 'gpu');
+          log(`cinemix: scene ${s.index} · scoring ${s.layers.length} layers into ${s.layers[0]?.space ?? 'hall'} space`, 'gpu');
         }, 700 + i * 520);
         later(() => {
           setProject((cur) =>
@@ -89,7 +89,7 @@ export function useStudio() {
           log(`scene ${s.index} ready · ${s.layers.length} stems · ${s.hits.length} sync hits`, 'ok');
           if (i === total - 1) {
             setAnalyzing(false);
-            log('pipeline complete · master bus conformed to -16 LUFS / -1 dBTP', 'ok');
+            log('pipeline complete · master conformed to -16 LUFS / -1 dBTP true-peak', 'ok');
           }
         }, 1200 + i * 520);
       });
@@ -129,7 +129,9 @@ export function useStudio() {
   }, [project, time]);
 
   useEffect(() => {
-    if (playing && sceneAtTime && sceneAtTime.id !== activeSceneId) setActiveSceneId(sceneAtTime.id);
+    if (!playing || !sceneAtTime || sceneAtTime.id === activeSceneId) return;
+    const raf = requestAnimationFrame(() => setActiveSceneId(sceneAtTime.id));
+    return () => cancelAnimationFrame(raf);
   }, [playing, sceneAtTime, activeSceneId]);
 
   useEffect(() => {
@@ -251,7 +253,7 @@ export function useStudio() {
       setProject((cur) => {
         if (!cur) return cur;
         const scene = cur.scenes.find((s) => s.id === sceneId);
-        const l = makeLayer(kind, scene?.layers[0]?.space ?? 'hall', scene?.tension ?? 0.6);
+        const l = makeLayer(kind, scene?.layers[0]?.space ?? 'hall', scene?.tension ?? 0.6, scene?.layers[0]?.root ?? 55);
         log(`generate: new ${l.name} · ${l.model} · seed ${l.seed}`, 'gpu');
         return { ...cur, scenes: cur.scenes.map((s) => (s.id === sceneId ? { ...s, layers: [...s.layers, l] } : s)) };
       });

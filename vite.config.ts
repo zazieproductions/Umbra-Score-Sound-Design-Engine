@@ -6,10 +6,12 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig(async ({ mode }) => {
   const plugins = [react(), tailwindcss()];
   try {
-    // @ts-ignore
+    // @ts-expect-error - .vite-source-tags.js is an untyped injected helper
     const m = await import('./.vite-source-tags.js');
     plugins.push(m.sourceTags());
-  } catch {}
+  } catch {
+    /* source tags unavailable — proceed without them */
+  }
 
   const env = loadEnv(mode, process.cwd(), ['VITE_', 'NEXT_PUBLIC_']);
   const processEnvDefines: Record<string, string> = {};
@@ -21,5 +23,9 @@ export default defineConfig(async ({ mode }) => {
     plugins,
     envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
     define: processEnvDefines,
+    server: {
+      host: true,
+      allowedHosts: ['.e2b.app', 'localhost', '127.0.0.1'],
+    },
   };
 })
