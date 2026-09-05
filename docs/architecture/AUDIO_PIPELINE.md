@@ -52,6 +52,10 @@ tension macro → glue → tape → tilt → M/S widen → exciter → brickwall
   1. ITU-R BS.1770 loudness conform → **-16 LUFS**,
   2. lookahead true-peak limiting → **-1 dBTP**,
   3. TPDF-dithered 24-bit PCM WAV (+ stems on request).
+- **Stem delivery:** `export/stemRender.ts` runs one pass per stem through
+  the *same* `schedule`/`scheduleClip`/`buildMaster` graph (ADR-0005); the
+  plan in `export/stemPlan.ts` guarantees one clock/one span across every
+  file. Full contract + DAW acceptance checklist: `DELIVERY.md`.
 
 Because both paths share `dsp.ts` primitives and `scheduleClip`, the exported
 master matches what was heard. The bounce reports `clipsPlaced` /
@@ -60,6 +64,9 @@ master matches what was heard. The bounce reports `clipsPlaced` /
 ## Invariants (also pinned in `tests/architecture.invariants.test.ts`)
 
 - Monitor and bounce share DSP code; a node existing in only one path is a bug.
+  Stem-delivery passes share it too (pinned by `tests/export.loudness.test.ts`).
+- Σ creative stems = Σ source stems = pre-master mix within 1e-6 (float32
+  rounding only); loudness conformance and master FX apply to MASTER only.
 - No clip on the timeline without either a backend `audioId` (real file) or a
   library `cacheKey` (real blob). Failures fail loudly.
 - Retrieval clips retain `asset` + `cacheKey` + `intentId` through conversion.

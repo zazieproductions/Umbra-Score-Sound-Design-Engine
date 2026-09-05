@@ -17,7 +17,11 @@ analysis, jobs, and the audio file store. Single crossing point:
 Timeline (lanes, inspector, scoring panel, library, models, export views),
 unified clip editing, master chain + BS.1770/true-peak/24-bit export,
 retrieval subsystem (planner, ranking, Freesound/Pixabay/user-library,
-IndexedDB cache, provenance, credits). Works fully without the backend.
+IndexedDB cache, provenance, credits), stem-delivery subsystem
+(`src/lib/export/`: one clock/span, creative+source stem axes, per-pass
+reverb/duck algebra, preflight, manifest/cue-sheet/credits, BWF, fflate ZIP —
+see `docs/architecture/DELIVERY.md`, ADR-0005). Works fully without the
+backend.
 
 ## Backend
 
@@ -44,11 +48,11 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 49 (`npm test`) — 19 retrieval acceptance + 6 architecture invariants
-  + 20 quality-measurement units + 4 rendered audio-QA gates.
-  The 4 rendered gates exercise the real DSP through the headless Web Audio
-  engine (`node-web-audio-api`); they skip (not fail) when that native addon
-  cannot load (no ALSA). `LD_LIBRARY_PATH` to an ALSA stub runs all 49.
+- Frontend: 121 (`npm test`) — 19 retrieval acceptance + 6 architecture
+  invariants + 20 quality-measurement units + 4 rendered audio-QA gates
+  (headless Web Audio via `node-web-audio-api`; they skip, not fail, when the
+  addon cannot load) + 72 export-delivery (clock 6, stemPlan 27, kernel
+  A/B/C/G 8, WAV/BWF 10, manifest 6, preflight+ZIP 10, loudness/boundaries 5).
 - Backend: 66 (`pytest backend/tests -q`), no downloads
 - `tsc -b` clean · `eslint` clean · `vite build` clean
 
@@ -65,6 +69,12 @@ thumped through the sub-bus highpass at render start) and band-limited
 oscillators across all pitched/transient voices (no fold-back aliasing).
 
 ## Known limitations
+
+- Stem-delivery algebra is kernel-tested, but the end-to-end DAW round-trip
+  acceptance (§11 of `DELIVERY.md`) is a MANUAL gate — no DAW exists in CI or
+  this sandbox; a human must tick it per release. Browser execution of
+  `stemRender`/`delivery` (OfflineAudioContext) is likewise untested here —
+  the node test env stubs no OfflineAudioContext by design.
 
 - Backend optional extras (torch, diffusers, CLAP, PySceneDetect) not installed
   in lightweight envs — providers honestly report unavailable.

@@ -35,6 +35,16 @@ retrieval tiers). Passing Tier 3 for a provider is the **only** way it earns
 `RUNTIME VERIFIED`, recorded in `docs/ai/CURRENT_STATE.md` with date, commit,
 and machine. CI never runs Tier 3 and never downloads weights.
 
+## Tier 3 (delivery) — stem package DAW round trip (manual, opt-in)
+
+The automated export tests prove the *algebra* (one clock, one span, Σ stems =
+mix within the documented 1e-6 tolerance, preflight gating, BWF integrity).
+The product gate is the 10-step manual checklist in
+`docs/architecture/DELIVERY.md` §11 — import a real package into any DAW at
+00:00, verify sample-exact placement, the sum-of-stems null test, format
+uniformity, tail behaviour and credits. Record the DAW + version used in the
+release notes; like provider Tier 3, CI cannot and does not fake this.
+
 ## CI
 
 `.github/workflows/ci.yml` runs Tier 1 on PRs (frontend install → lint →
