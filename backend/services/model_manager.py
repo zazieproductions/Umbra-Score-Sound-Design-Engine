@@ -1,190 +1,229 @@
-"""
-Model Manager Service
+"""Local model discovery.
 
-Manages model downloads, caching, and lifecycle.
+The Models view must never show invented statistics. This module only reports
+what is genuinely on disk or genuinely importable:
+
+* is the Python package importable?
+* is a checkpoint directory actually present, and how big is it?
+* which device would actually be used?
+
+Checkpoint layout follows ACE-Step's own ``model_downloader`` conventions:
+a ``checkpoints/`` root containing one directory per component.
 """
 
+from __future__ import annotations
+
+import importlib.metadata
+import importlib.util
 import os
-import logging
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional
-
-from ..schemas.providers import DeviceType, ProviderStatus
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, List, Optional
 
 
-class ModelManager:
+def checkpoints_root() -> Path:
+    """Where Umbra looks for local weights.
+
+    Honours ``UMBRA_CHECKPOINTS`` first, then ACE-Step's ``ACESTEP_CHECKPOINT_DIR``,
+    then a repo-local ``checkpoints/`` folder (git-ignored).
     """
-    Manages ML model downloads and caching.
-    
-    Handles:
-    - Model availability checking
-    - Device detection (CUDA/MPS/CPU)
-    - Model directory management
-    - Cache configuration
-    """
-    
-    def __init__(
-        self,
-        models_dir: str = "./models",
-        cache_dir: str = "./data/cache",
-    ):
-        self.models_dir = Path(models_dir)
-        self.cache_dir = Path(cache_dir)
-        
-        # Create directories
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Configure HuggingFace cache
-        os.environ.setdefault("HF_HOME", str(self.cache_dir / "huggingface"))
-        os.environ.setdefault("TRANSFORMERS_CACHE", str(self.cache_dir / "transformers"))
-    
-    def get_device(self) -> DeviceType:
-        """
-        Detect the best available device.
-        
-        Returns:
-            DeviceType enum value
-        """
-        # Check CUDA
+    for env in ("UMBRA_CHECKPOINTS", "ACESTEP_CHECKPOINT_DIR"):
+        v = os.environ.get(env)
+        if v:
+            return Path(v).expanduser()
+    return Path.cwd() / "checkpoints"
+
+
+def package_version(name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(name)
+    except Exception:
+        return None
+
+
+def package_installed(name: str) -> bool:
+    """True only when the module can genuinely be located."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def dir_size(path: Path, *, limit_files: int = 20000) -> Optional[int]:
+    """Real on-disk size of a checkpoint directory."""
+    if not path.exists():
+        return None
+    total = 0
+    seen = 0
+    for p in path.rglob("*"):
+        if seen > limit_files:
+            break
         try:
-            import torch
-            if torch.cuda.is_available():
-                return DeviceType.CUDA
-        except ImportError:
-            pass
-        
-        # Check Apple MPS
-        try:
-            import torch
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                return DeviceType.MPS
-        except (ImportError, AttributeError):
-            pass
-        
-        return DeviceType.CPU
-    
-    def get_device_info(self) -> dict:
-        """
-        Get detailed device information.
-        
-        Returns:
-            Dict with device details
-        """
-        device = self.get_device()
-        info = {
-            "device": device,
-            "device_name": self._get_device_name(device),
-            "torch_available": False,
-            "cuda_available": False,
-            "mps_available": False,
+            if p.is_file():
+                total += p.stat().st_size
+                seen += 1
+        except OSError:
+            continue
+    return total
+
+
+# ACE-Step's own component list (acestep/model_downloader.py MAIN_MODEL_COMPONENTS)
+ACE_STEP_MAIN_COMPONENTS = [
+    "acestep-v15-turbo",
+    "vae",
+    "Qwen3-Embedding-0.6B",
+    "acestep-5Hz-lm-1.7B",
+]
+
+# ACE-Step's SUBMODEL_REGISTRY, as of ACE-Step 1.5.
+ACE_STEP_SUBMODELS: Dict[str, str] = {
+    "acestep-5Hz-lm-0.6B": "ACE-Step/acestep-5Hz-lm-0.6B",
+    "acestep-5Hz-lm-4B": "ACE-Step/acestep-5Hz-lm-4B",
+    "acestep-v15-turbo-shift3": "ACE-Step/acestep-v15-turbo-shift3",
+    "acestep-v15-sft": "ACE-Step/acestep-v15-sft",
+    "acestep-v15-base": "ACE-Step/acestep-v15-base",
+    "acestep-v15-turbo-shift1": "ACE-Step/acestep-v15-turbo-shift1",
+    "acestep-v15-turbo-continuous": "ACE-Step/acestep-v15-turbo-continuous",
+    "acestep-v15-xl-base": "ACE-Step/acestep-v15-xl-base",
+    "acestep-v15-xl-sft": "ACE-Step/acestep-v15-xl-sft",
+    "acestep-v15-xl-turbo": "ACE-Step/acestep-v15-xl-turbo",
+}
+
+ACE_STEP_MAIN_REPO = "ACE-Step/Ace-Step1.5"
+
+
+@dataclass
+class CheckpointInfo:
+    name: str
+    present: bool
+    path: Optional[str] = None
+    size_bytes: Optional[int] = None
+    repo: Optional[str] = None
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "present": self.present,
+            "path": self.path,
+            "sizeBytes": self.size_bytes,
+            "repo": self.repo,
         }
-        
-        try:
-            import torch
-            info["torch_available"] = True
-            info["torch_version"] = torch.__version__
-            info["cuda_available"] = torch.cuda.is_available()
-            
-            if torch.cuda.is_available():
-                info["cuda_version"] = torch.version.cuda
-                info["gpu_name"] = torch.cuda.get_device_name(0)
-                info["gpu_memory_total"] = torch.cuda.get_device_properties(0).total_memory
-                info["gpu_memory_allocated"] = torch.cuda.memory_allocated(0)
-            
-            info["mps_available"] = (
-                hasattr(torch.backends, 'mps') and 
-                torch.backends.mps.is_available()
+
+
+@dataclass
+class PackageInfo:
+    name: str
+    installed: bool
+    version: Optional[str] = None
+    purpose: str = ""
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "installed": self.installed,
+            "version": self.version,
+            "purpose": self.purpose,
+        }
+
+
+@dataclass
+class ModelReport:
+    checkpoints: List[CheckpointInfo] = field(default_factory=list)
+    packages: List[PackageInfo] = field(default_factory=list)
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "checkpointsRoot": str(checkpoints_root()),
+            "checkpoints": [c.to_json() for c in self.checkpoints],
+            "packages": [p.to_json() for p in self.packages],
+        }
+
+
+def ace_step_checkpoints() -> List[CheckpointInfo]:
+    root = checkpoints_root()
+    out: List[CheckpointInfo] = []
+    for name in ACE_STEP_MAIN_COMPONENTS:
+        p = root / name
+        out.append(
+            CheckpointInfo(
+                name=name,
+                present=p.is_dir() and any(p.iterdir()) if p.exists() else False,
+                path=str(p) if p.exists() else None,
+                size_bytes=dir_size(p),
+                repo=ACE_STEP_MAIN_REPO,
             )
-            
-        except ImportError:
-            pass
-        
-        return info
-    
-    def _get_device_name(self, device: DeviceType) -> str:
-        """Get a human-readable device name."""
-        names = {
-            DeviceType.CUDA: "NVIDIA GPU (CUDA)",
-            DeviceType.MPS: "Apple Silicon GPU (Metal)",
-            DeviceType.CPU: "CPU",
-        }
-        return names.get(device, "Unknown")
-    
-    def get_model_status(self, model_name: str) -> dict:
-        """
-        Check the status of a specific model.
-        
-        Returns:
-            Dict with model availability and path info
-        """
-        model_path = self.models_dir / model_name
-        
-        return {
-            "name": model_name,
-            "installed": model_path.exists(),
-            "path": str(model_path) if model_path.exists() else None,
-            "size_bytes": self._get_dir_size(model_path) if model_path.exists() else 0,
-        }
-    
-    def _get_dir_size(self, path: Path) -> int:
-        """Get total size of a directory."""
-        if not path.exists():
-            return 0
-        total = 0
-        for entry in path.rglob('*'):
-            if entry.is_file():
-                total += entry.stat().st_size
-        return total
-    
-    def cleanup_cache(self) -> dict:
-        """
-        Clean up model cache.
-        
-        Returns:
-            Dict with cleanup results
-        """
-        import shutil
-        
-        freed_bytes = 0
-        freed_files = 0
-        
-        for cache_path in [
-            self.cache_dir / "huggingface",
-            self.cache_dir / "transformers",
-        ]:
-            if cache_path.exists():
-                size = self._get_dir_size(cache_path)
-                try:
-                    shutil.rmtree(cache_path)
-                    freed_bytes += size
-                    freed_files += 1
-                except Exception as e:
-                    logger.error(f"Failed to clean {cache_path}: {e}")
-        
-        return {
-            "freed_bytes": freed_bytes,
-            "freed_directories": freed_files,
-        }
-    
-    def list_installed_models(self) -> list[dict]:
-        """
-        List all installed models.
-        
-        Returns:
-            List of model info dicts
-        """
-        models = []
-        
-        for item in self.models_dir.iterdir():
-            if item.is_dir():
-                models.append({
-                    "name": item.name,
-                    "path": str(item),
-                    "size_bytes": self._get_dir_size(item),
-                    "files": len(list(item.rglob("*"))),
-                })
-        
-        return models
+        )
+    for name, repo in ACE_STEP_SUBMODELS.items():
+        p = root / name
+        if not p.exists():
+            continue  # only list optional submodels that are genuinely installed
+        out.append(
+            CheckpointInfo(
+                name=name,
+                present=any(p.iterdir()),
+                path=str(p),
+                size_bytes=dir_size(p),
+                repo=repo,
+            )
+        )
+    return out
+
+
+def ace_step_installed_dit_models() -> List[str]:
+    """DiT checkpoints actually present on disk."""
+    root = checkpoints_root()
+    if not root.exists():
+        return []
+    names = []
+    known = set(ACE_STEP_SUBMODELS) | {"acestep-v15-turbo"}
+    for p in sorted(root.iterdir()):
+        if p.is_dir() and p.name in known and any(p.iterdir()):
+            names.append(p.name)
+    return names
+
+
+def ace_step_core_ready() -> bool:
+    """True only when every component ACE-Step needs to load is present."""
+    root = checkpoints_root()
+    for name in ACE_STEP_MAIN_COMPONENTS:
+        p = root / name
+        if not (p.is_dir() and any(p.iterdir())):
+            return False
+    return True
+
+
+@lru_cache(maxsize=1)
+def _tracked_packages() -> List[tuple]:
+    return [
+        ("torch", "Trained-model inference runtime"),
+        ("torchaudio", "Audio I/O and resampling for trained models"),
+        ("transformers", "Qwen3 text encoder used by ACE-Step"),
+        ("diffusers", "Diffusion pipeline interfaces"),
+        ("accelerate", "Device placement / offload"),
+        ("soundfile", "Decoding and WAV writing"),
+        ("scipy", "Resampling and analysis"),
+        ("numpy", "Array maths"),
+        ("acestep", "ACE-Step 1.5 inference package"),
+        ("peft", "LoRA / personalization (optional)"),
+        ("scenedetect", "PySceneDetect cut detection (optional)"),
+    ]
+
+
+def package_report() -> List[PackageInfo]:
+    out: List[PackageInfo] = []
+    for name, purpose in _tracked_packages():
+        installed = package_installed(name)
+        out.append(
+            PackageInfo(
+                name=name,
+                installed=installed,
+                version=package_version(name) if installed else None,
+                purpose=purpose,
+            )
+        )
+    return out
+
+
+def model_report() -> ModelReport:
+    return ModelReport(checkpoints=ace_step_checkpoints(), packages=package_report())

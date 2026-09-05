@@ -1,21 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Magnet, Minus, Plus, Scissors, ZoomIn } from 'lucide-react';
+import { Magnet, Minus, Plus, Scissors, SquareDashed, ZoomIn } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import { KIND_META } from '../lib/types';
 import { waveform } from '../lib/generate';
 import { tc } from '../lib/format';
 import type { LayerKind } from '../lib/types';
-import { ROLE_LABELS } from '../lib/library/types';
-import type { SoundClip } from '../lib/library/types';
-
-const SOURCE_STYLE: Record<SoundClip['source'], { label: string; color: string }> = {
-  LIB: { label: 'LIB', color: '#4b8f9a' },
-  USR: { label: 'USR', color: '#7d6bff' },
-  GEN: { label: 'GEN', color: '#a86bd6' },
-  VID: { label: 'VID', color: '#e0663f' },
-  PROC: { label: 'PROC', color: '#b9a37e' },
-  PIX: { label: 'PIX', color: '#d8a24a' },
-};
+import ClipLane, { ClipLaneHeaders } from './ClipLane';
 
 function WaveRow({
   seed,
@@ -63,6 +53,10 @@ export default function Timeline({ studio }: { studio: Studio }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [snap, setSnap] = useState(true);
   const [drag, setDrag] = useState(false);
+  const [marking, setMarking] = useState<number | null>(null);
+  const [laneWidth, setLaneWidth] = useState(1);
+
+  const { range, setRange, clips, selectedClip } = studio;
 
   const duration = project?.duration ?? 1;
 
@@ -97,8 +91,41 @@ export default function Timeline({ studio }: { studio: Studio }) {
     };
   }, [drag, posFromEvent, seek]);
 
+  // Measure the drawn lane width so clip drags map pixels → seconds exactly.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const measure = () => {
+      const inner = el.firstElementChild as HTMLElement | null;
+      setLaneWidth(inner?.scrollWidth || el.scrollWidth || 1);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [zoom, project?.id]);
+
+  useEffect(() => {
+    if (marking === null) return;
+    const move = (e: MouseEvent) => {
+      const t = posFromEvent(e.clientX);
+      setRange({ start: Math.min(marking, t), end: Math.max(marking, t) });
+    };
+    const up = () => {
+      setRange((r) => (r && r.end - r.start < 0.25 ? null : r));
+      setMarking(null);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+  }, [marking, posFromEvent, setRange]);
+
   if (!project) return null;
   const playheadPct = (time / duration) * 100;
+  const pxPerSecond = laneWidth / Math.max(0.001, duration);
   const ticks = Array.from({ length: Math.floor(duration / 10) + 1 }, (_, i) => i * 10);
 
   return (
@@ -107,13 +134,27 @@ export default function Timeline({ studio }: { studio: Studio }) {
         <span className="eyebrow text-bone/80">Timeline</span>
         <span className="chip">{project.scenes.length} scenes</span>
         <span className="chip">{project.fps} fps</span>
+        {clips.length > 0 && <span className="chip">{clips.length} clips</span>}
         {activeScene && <span className="chip hidden sm:inline-flex">{activeScene.layers[0]?.space ?? 'hall'} space</span>}
         <div className="ml-auto flex items-center gap-1.5">
           <button className={`btn px-2 py-1.5 ${snap ? 'text-ember' : ''}`} onClick={() => setSnap((s) => !s)} title="Snap to cuts & hits">
             <Magnet size={12} />
             <span className="hidden sm:inline">Snap</span>
           </button>
-          <button className="btn px-2 py-1.5" onClick={() => studio.log(`split marker placed @ ${tc(time, true)}`, 'info')} title="Split at playhead">
+          <button
+            className={`btn px-2 py-1.5 ${range ? 'text-ember' : ''}`}
+            onClick={() => setRange(range ? null : { start: time, end: Math.min(duration, time + 12) })}
+            title="Set an in/out range for generation (or shift-drag the ruler)"
+          >
+            <SquareDashed size={12} />
+            <span className="hidden sm:inline">{range ? `${tc(range.start)}–${tc(range.end)}` : 'Range'}</span>
+          </button>
+          <button
+            className="btn px-2 py-1.5"
+            disabled={!selectedClip}
+            onClick={() => selectedClip && studio.splitClip(selectedClip.id, time)}
+            title="Split the selected clip at the playhead"
+          >
             <Scissors size={12} />
           </button>
           <div className="flex items-center gap-1 rounded-lg border border-white/[0.09] bg-white/[0.03] px-1.5 py-1">
@@ -144,6 +185,7 @@ export default function Timeline({ studio }: { studio: Studio }) {
               <span className="truncate text-[10px] text-ash">{l.name}</span>
             </div>
           ))}
+          <ClipLaneHeaders studio={studio} />
         </div>
 
         <div className="relative min-w-0 flex-1 overflow-x-auto overflow-y-auto" ref={trackRef}>
@@ -151,8 +193,14 @@ export default function Timeline({ studio }: { studio: Studio }) {
             <div
               className="relative h-6 cursor-pointer border-b border-white/[0.06] bg-black/20"
               onMouseDown={(e) => {
+                const t = posFromEvent(e.clientX);
+                if (e.shiftKey) {
+                  setMarking(t);
+                  setRange({ start: t, end: t });
+                  return;
+                }
                 setDrag(true);
-                seek(posFromEvent(e.clientX));
+                seek(t);
               }}
             >
               {ticks.map((t) => (
@@ -225,18 +273,18 @@ export default function Timeline({ studio }: { studio: Studio }) {
               );
             })}
 
-            {(() => {
-              const sceneClips = project.clips.filter((c) => c.sceneId === activeScene?.id);
-              if (!sceneClips.length) return null;
-              return (
-                <div className="relative h-[30px] border-b border-white/[0.04]">
-                  <span className="eyebrow absolute left-1 top-0 z-10 py-0.5 text-[7.5px] text-brine/80">RETRIEVED</span>
-                  {sceneClips.map((c) => (
-                    <ClipBlock key={c.id} studio={studio} clip={c} duration={duration} />
-                  ))}
-                </div>
-              );
-            })()}
+            <ClipLane studio={studio} duration={duration} pxPerSecond={pxPerSecond} />
+
+            {range && (
+              <div
+                className="pointer-events-none absolute top-0 z-[9] h-full border-x border-ember/60 bg-ember/[0.09]"
+                style={{ left: `${(range.start / duration) * 100}%`, width: `${((range.end - range.start) / duration) * 100}%` }}
+              >
+                <span className="tnum absolute -top-0 left-1 text-[8.5px] text-ember">
+                  {(range.end - range.start).toFixed(1)}s
+                </span>
+              </div>
+            )}
 
             <div className="pointer-events-none absolute top-0 z-10 h-full" style={{ left: `${playheadPct}%` }}>
               <div className={`h-full w-[1.5px] bg-ember ${playing && audioOn ? 'shadow-[0_0_14px_3px_rgba(255,59,92,0.55)]' : 'shadow-[0_0_8px_1px_rgba(255,59,92,0.4)]'}`} />
@@ -246,95 +294,5 @@ export default function Timeline({ studio }: { studio: Studio }) {
         </div>
       </div>
     </section>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Retrieved sample clip block — draggable, trimmable, selectable.     */
-/* ------------------------------------------------------------------ */
-
-function ClipBlock({ studio, clip, duration }: { studio: Studio; clip: SoundClip; duration: number }) {
-  const [dragMode, setDragMode] = useState<'none' | 'move' | 'left' | 'right'>('none');
-  const [ox, setOx] = useState({ x: 0, start: clip.start, end: clip.end });
-  const meta = SOURCE_STYLE[clip.source];
-  const selected = studio.selectedClipId === clip.id;
-  const left = (clip.start / duration) * 100;
-  const width = ((clip.end - clip.start) / duration) * 100;
-
-  const begin = (e: React.MouseEvent, mode: 'move' | 'left' | 'right') => {
-    e.stopPropagation();
-    setDragMode(mode);
-    setOx({ x: e.clientX, start: clip.start, end: clip.end });
-    studio.setSelectedClipId(clip.id);
-  };
-
-  useEffect(() => {
-    if (dragMode === 'none') return;
-    const move = (e: MouseEvent) => {
-      const dxT = ((e.clientX - ox.x) / Math.max(1, duration)) * duration;
-      if (dragMode === 'move') {
-        const next = Math.max(0, ox.start + dxT);
-        studio.patchClip(clip.id, {
-          start: next,
-          end: next + (ox.end - ox.start),
-        });
-      } else if (dragMode === 'left') {
-        const start = Math.min(Math.max(0, ox.start + dxT), ox.end - 0.05);
-        studio.patchClip(clip.id, { start, offset: clip.offset + (start - ox.start) });
-      } else {
-        const end = Math.max(ox.end + dxT, ox.start + 0.05);
-        studio.patchClip(clip.id, { end });
-      }
-    };
-    const up = () => setDragMode('none');
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    return () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    };
-  }, [dragMode, ox, clip.id, clip.offset, duration, studio]);
-
-  return (
-    <div
-      className={`group absolute top-[4px] h-[22px] cursor-grab overflow-hidden rounded-[4px] border select-none active:cursor-grabbing ${
-        selected ? 'ring-1 ring-inset ring-ember/70' : ''
-      }`}
-      style={{
-        left: `${left}%`,
-        width: `${width}%`,
-        borderColor: `${meta.color}66`,
-        background: `linear-gradient(180deg, ${meta.color}2e, ${meta.color}10)`,
-        opacity: clip.muted ? 0.35 : 1,
-      }}
-      onMouseDown={(e) => begin(e, 'move')}
-      onDoubleClick={() => void studio.auditionClip(clip.id)}
-      onClick={(e) => {
-        e.stopPropagation();
-        studio.setSelectedClipId(clip.id);
-      }}
-      title={`${clip.name} · ${ROLE_LABELS[clip.role]} · ${tc(clip.start, true)} · ${clip.asset.providerLabel} · ${clip.asset.license} · MATCH ${Math.round(clip.match * 100)}%`}
-    >
-      <span
-        className="absolute inset-y-0 left-0 w-[5px] cursor-ew-resize bg-white/20 opacity-0 group-hover:opacity-100"
-        onMouseDown={(e) => begin(e, 'left')}
-      />
-      <span
-        className="absolute inset-y-0 right-0 w-[5px] cursor-ew-resize bg-white/20 opacity-0 group-hover:opacity-100"
-        onMouseDown={(e) => begin(e, 'right')}
-      />
-      <span className="pointer-events-none absolute inset-y-0 left-[7px] flex items-center gap-1">
-        <span
-          className="tnum rounded-[2px] px-[3px] py-px text-[7px] font-bold text-void"
-          style={{ background: meta.color, opacity: 0.9 }}
-        >
-          {meta.label}
-        </span>
-        <span className="max-w-[120px] truncate text-[8.5px] text-bone/85">{clip.name}</span>
-      </span>
-      <span className="pointer-events-none absolute inset-y-0 right-[7px] hidden items-center text-[7.5px] text-ash/80 group-hover:flex">
-        {Math.round(clip.match * 100)}%
-      </span>
-    </div>
   );
 }

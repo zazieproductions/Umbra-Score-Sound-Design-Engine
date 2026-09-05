@@ -1,6 +1,7 @@
 import { buildMaster, DEFAULT_MASTER, f32, type MasterChain, type MasterParams } from './dsp';
 import { buildVoice, type Voice } from './voices';
-import { KIND_META, type Layer } from './types';
+import { clipEnd, loadClipBuffer, scheduleClip, type ClipVoice } from './clips';
+import { KIND_META, type AudioClip, type Layer } from './types';
 
 export type { MasterParams };
 export { DEFAULT_MASTER };
@@ -11,20 +12,26 @@ interface Live {
   nextEvent: number;
 }
 
+/** A generated clip currently sounding in the monitor. */
+interface LiveClip {
+  voice: ClipVoice;
+  clip: AudioClip;
+  /** transport position this clip was scheduled against */
+  scheduledAt: number;
+}
+
 /**
  * Realtime monitoring engine. Keeps a pool of voices matching the active
  * scene, drives event scheduling with lookahead, and exposes metering.
+ * Unified for procedural + generative + library clips.
  */
 export class ScoreEngine {
   ctx: AudioContext | null = null;
+  private decodeCtx: OfflineAudioContext | null = null;
   master: MasterChain | null = null;
-
-  /** master graph accessor for sample-clip polling (retrieved audio) */
-  getMasterNode(): MasterChain {
-    this.ensure();
-    return this.master!;
-  }
   private live = new Map<string, Live>();
+  private liveClips = new Map<string, LiveClip>();
+  private clipBuffers = new Map<string, AudioBuffer>();
   private raf = 0;
   private running = false;
   private params: MasterParams = { ...DEFAULT_MASTER };
@@ -45,6 +52,23 @@ export class ScoreEngine {
     return ctx;
   }
 
+  /** Compatibility accessor for legacy library clip scheduler */
+  getMasterNode(): MasterChain {
+    this.ensure();
+    return this.master!;
+  }
+
+  /**
+   * A decode-only context for drawing waveforms. Uses the live context when it
+   * already exists, otherwise a throwaway offline one so we never trip the
+   * browser's autoplay policy just to draw a clip.
+   */
+  peakContext(): BaseAudioContext {
+    if (this.ctx) return this.ctx;
+    if (!this.decodeCtx) this.decodeCtx = new OfflineAudioContext(2, 1, 48000);
+    return this.decodeCtx;
+  }
+
   setMaster(p: Partial<MasterParams>) {
     Object.assign(this.params, p);
     if (this.master && this.ctx) this.master.setParams(p, this.ctx.currentTime, 0.05);
@@ -57,7 +81,6 @@ export class ScoreEngine {
   setTension(t: number) {
     this.tension = t;
     if (!this.master || !this.ctx) return;
-    // dynamic range macro: quiet scenes sit back, peaks lean in hard
     const g = 0.34 + t * 0.92;
     this.master.dynamics.gain.setTargetAtTime(g, this.ctx.currentTime, 0.6);
   }
@@ -126,7 +149,6 @@ export class ScoreEngine {
         voice.start(now + 0.02);
         entry = { voice, layer: effective, nextEvent: now + 0.25 + Math.random() * 0.6 };
         this.live.set(layer.id, entry);
-        // fade in to avoid clicks
         voice.update(effective, this.tension, now + 0.03, 0.35);
       } else {
         entry.layer = effective;
@@ -135,17 +157,113 @@ export class ScoreEngine {
     }
   }
 
-  start(layers: Layer[]) {
+  /* ------------------------------------------------- generated clip audio */
+
+  async prepareClip(clip: AudioClip): Promise<AudioBuffer> {
+    const ctx = this.ensure();
+    const buf = await loadClipBuffer(ctx, clip.url);
+    this.clipBuffers.set(clip.audioId, buf);
+    // also store by cacheKey for library clips that use cacheKey as identifier
+    if (clip.cacheKey) this.clipBuffers.set(clip.cacheKey, buf);
+    return buf;
+  }
+
+  // Library compat: prepare from raw AudioBuffer (already decoded)
+  prepareBuffer(key: string, buf: AudioBuffer): void {
+    this.clipBuffers.set(key, buf);
+  }
+
+  hasClipBuffer(key: string): boolean {
+    return this.clipBuffers.has(key);
+  }
+
+  getClipBuffer(key: string): AudioBuffer | undefined {
+    return this.clipBuffers.get(key);
+  }
+
+  private syncClips(clips: AudioClip[], time: number) {
+    if (!this.ctx || !this.master) return;
+    const now = this.ctx.currentTime;
+    const anySolo = clips.some((c) => c.solo);
+    const shouldPlay = new Map<string, AudioClip>();
+    for (const clip of clips) {
+      const silent = clip.muted || (anySolo && !clip.solo);
+      if (silent) continue;
+      if (time >= clip.start && time < clipEnd(clip) - 0.02) shouldPlay.set(clip.id, clip);
+    }
+    for (const [id, entry] of this.liveClips) {
+      const next = shouldPlay.get(id);
+      const changed =
+        !next ||
+        next.offset !== entry.clip.offset ||
+        next.duration !== entry.clip.duration ||
+        next.start !== entry.clip.start ||
+        next.audioId !== entry.clip.audioId;
+      if (changed) {
+        entry.voice.stop(now);
+        const v = entry.voice;
+        window.setTimeout(() => v.dispose(), 400);
+        this.liveClips.delete(id);
+      }
+    }
+    for (const [id, clip] of shouldPlay) {
+      if (this.liveClips.has(id)) {
+        const entry = this.liveClips.get(id)!;
+        entry.voice.fader.gain.setTargetAtTime(Math.max(0, clip.gain), now, 0.05);
+        entry.clip = clip;
+        continue;
+      }
+      // library clips may be keyed by cacheKey rather than audioId
+      const buffer = this.clipBuffers.get(clip.audioId) ?? (clip.cacheKey ? this.clipBuffers.get(clip.cacheKey) : undefined);
+      if (!buffer) continue;
+      const into = Math.max(0, time - clip.start);
+      const remaining = clip.duration - into;
+      if (remaining <= 0.05) continue;
+      // For library clips with complex transforms, we still use the simple
+      // scheduleClip path — the transform filters are applied at generation
+      // time via offline rendering or via the library's own derived buffers
+      // when needed. Keeping one path avoids duplicating voice graphs.
+      const voice = scheduleClip(this.master, clip, buffer, {
+        at: now + 0.02,
+        offset: clip.offset + into,
+        duration: remaining,
+      });
+      this.liveClips.set(id, { voice, clip, scheduledAt: time });
+    }
+  }
+
+  private stopClips() {
+    if (!this.ctx) {
+      this.liveClips.clear();
+      return;
+    }
+    const now = this.ctx.currentTime;
+    for (const [, entry] of this.liveClips) {
+      entry.voice.stop(now);
+      const v = entry.voice;
+      window.setTimeout(() => v.dispose(), 400);
+    }
+    this.liveClips.clear();
+  }
+
+  start(layers: Layer[], clips: AudioClip[] = [], time = 0) {
     const ctx = this.ensure();
     void ctx.resume();
     this.running = true;
     this.sync(layers);
+    this.syncClips(clips, time);
     this.loop();
   }
 
-  update(layers: Layer[]) {
+  update(layers: Layer[], clips: AudioClip[] = [], time = 0) {
     if (!this.running) return;
     this.sync(layers);
+    this.syncClips(clips, time);
+  }
+
+  tickClips(clips: AudioClip[], time: number) {
+    if (!this.running) return;
+    this.syncClips(clips, time);
   }
 
   private loop() {
@@ -173,7 +291,7 @@ export class ScoreEngine {
     this.raf = requestAnimationFrame(tick);
   }
 
-  /** Listen to a retrieved library buffer through the master graph. */
+  /** Listen to a buffer through the master graph — used for library previews */
   auditionBuffer(buffer: AudioBuffer, duration = 3) {
     const ctx = this.ensure();
     void ctx.resume();
@@ -231,7 +349,6 @@ export class ScoreEngine {
         /* noop */
       }
     }, (dur + 1.6) * 1000);
-    // keep meters alive during an audition even when the transport is stopped
     if (!this.running) {
       this.running = true;
       this.loop();
@@ -242,6 +359,7 @@ export class ScoreEngine {
   }
 
   stop() {
+    this.stopClips();
     if (!this.ctx) {
       this.running = false;
       return;

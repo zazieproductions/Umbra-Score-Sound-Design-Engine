@@ -348,7 +348,7 @@ function CandidateRow({
       await studio.replaceClipSource(clipId, c);
     } else {
       const t = intent.time ?? studio.time;
-      await studio.placeCandidate(c, intent, t);
+      await studio.placeCandidate(intent, c, t);
     }
     setBusy(false);
   };

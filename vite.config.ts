@@ -26,6 +26,17 @@ export default defineConfig(async ({ mode }) => {
     server: {
       host: true,
       allowedHosts: ['.e2b.app', 'localhost', '127.0.0.1'],
+      // The browser never talks to the Python service directly — everything
+      // goes through /api so the app works unchanged behind a remote preview.
+      proxy: {
+        '/api': {
+          target: env.VITE_UMBRA_BACKEND || 'http://127.0.0.1:8000',
+          changeOrigin: true,
+          // generation can take minutes on CPU
+          timeout: 15 * 60 * 1000,
+          proxyTimeout: 15 * 60 * 1000,
+        },
+      },
     },
   };
 })
