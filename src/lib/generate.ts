@@ -1,3 +1,18 @@
+/* ==================================================================== *
+ *  SCENE / LAYER PLANNING (frontend, deterministic)
+ *
+ *  Owns:
+ *    demo-project construction, per-scene procedural layer stacks,
+ *    key/tempo assignment, seeded variation. No network, no models.
+ *
+ *  Does not own:
+ *    trained-model prompting (backend/analysis/spotting.py) ·
+ *    realtime playback (audio.ts) · project state (useStudio.ts).
+ *
+ *  Invariant:
+ *    planning is deterministic — same scene always plans the same stack.
+ * ==================================================================== */
+
 import { mulberry32, hashString } from './prng';
 import type { Layer, LayerKind, Project, Scene, SpaceId } from './types';
 import { KIND_META } from './types';

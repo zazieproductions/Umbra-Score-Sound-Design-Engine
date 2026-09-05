@@ -144,5 +144,5 @@ which devices were actually detected.
 
 - Reference audio you supply stays on your machine and is never uploaded.
 - Personalization material lives in `training/user_audio/`, which is git-ignored. See
-  [`docs/PERSONALIZATION.md`](./docs/PERSONALIZATION.md).
+  [`docs/personalization/PERSONALIZATION.md`](./docs/personalization/PERSONALIZATION.md).
 - Umbra ships no training datasets and performs no scraping.

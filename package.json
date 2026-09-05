@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify": "npm run typecheck && npm run lint && npm test"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",

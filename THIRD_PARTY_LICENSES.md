@@ -55,7 +55,7 @@ transitive dependencies carry their own licences.
 | **httpx** | Talking to a separately-running ACE-Step API server | BSD-3-Clause |
 | **pytest** | Backend test suite | MIT |
 
-Optional, only if you enable personalization (see `docs/PERSONALIZATION.md`):
+Optional, only if you enable personalization (see `docs/personalization/PERSONALIZATION.md`):
 
 | Package | Used for | Licence |
 | --- | --- | --- |

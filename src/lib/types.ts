@@ -78,7 +78,6 @@ import type {
   SoundRole,
   ClipSource,
   TransformSpec,
-  LicenseClass,
 } from './library/types';
 
 export type ClipProvider =
@@ -258,7 +257,7 @@ export function audioClipToSoundClipCompat(c: AudioClip): import('./library/type
   // AudioClip already contains superset, so we just cast and ensure required fields
   const lib = c as unknown as import('./library/types').SoundClip;
   if (lib.start != null && lib.end == null && c.duration != null) {
-    (lib as any).end = c.start + c.duration;
+    lib.end = c.start + c.duration;
   }
   return lib;
 }
