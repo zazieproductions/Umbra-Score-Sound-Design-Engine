@@ -2,7 +2,8 @@
  *  UMBRA · RETRIEVAL SERVICE
  *
  *  Orchestrates the full chain for one intent:
- *    provider search → license gate → rank → (CLAP rerank) → cache → clip
+ *    video events / scene → plan → provider search → license gate
+ *    → rank → (CLAP rerank) → cache → family variants → AudioClip
  *
  *  Providers are searched in privilege order:
  *    1. User Library (highest privilege, offline, personal)
@@ -10,7 +11,9 @@
  *    3. Pixabay assisted (no programmatic search — surfaced separately)
  *
  *  Failures are surfaced, never faked, and never silently substituted
- *  with generative audio labeled as library material.
+ *  with generative audio labeled as library material. Negative space
+ *  is a valid decision, and every auto decision is reported with its
+ *  reason (AutoPlacementReport).
  * ==================================================================== */
 
 import { FreesoundProvider } from './freesound';
@@ -18,9 +21,10 @@ import { UserLibraryProvider } from './userLibrary';
 import { PixabayAssistedProvider } from './pixabay';
 import { soundCache, provenanceStore, settingsStore, shortId } from './cache';
 import { rankCandidates, applyClapRerank, getClapReranker } from './ranking';
-import { planScene } from './planner';
-import type { SceneSoundContext } from './types';
+import { planScene, planSoundEvents, type PlanEventsOptions } from './planner';
+import type { SceneSoundContext, SoundEventCandidate } from './types';
 import type {
+  AutoPlacementReport,
   FreesoundCredentials,
   LibraryAsset,
   LibrarySettings,
@@ -29,9 +33,48 @@ import type {
   RetrievalIntent,
   RetrievalSearchResult,
   SoundClip,
+  SoundDistance,
+  SoundEventKind,
+  TransformSpec,
 } from './types';
 import { DEFAULT_LIBRARY_SETTINGS, NO_TRANSFORM, isBedRole } from './types';
 import type { SoundLibraryProvider } from './provider';
+
+export interface AutoDesignOptions {
+  /** video-analysis candidates that DRIVE the run (events first) */
+  events?: SoundEventCandidate[];
+  /** override planner options (confidence threshold, tolerance, caps) */
+  plan?: PlanEventsOptions;
+}
+
+export interface AutoPlacementDetail {
+  clipId: string;
+  role: SoundClip['role'];
+  eventTimestamp?: number;
+  placementTimestamp?: number;
+  eventConfidence?: number;
+  searchQuery?: string;
+  /** evidence strings from the video-analysis stage (kept on the clip) */
+  eventEvidence?: string[];
+  /** retrieval intent kept for FIND ALTERNATIVE reuse */
+  eventKind?: SoundEventKind;
+  eventMaterial?: string;
+  eventAction?: string;
+  eventEnvironment?: string;
+  eventDistance?: SoundDistance;
+  eventPerspective?: string;
+  autoPlaced: boolean;
+}
+
+export interface AutoDesignResult {
+  placed: SoundClip[];
+  suggestions: { intent: RetrievalIntent; candidates: RankedCandidate[] }[];
+  skipped: number;
+  /** per-intent truthful status — placed / suggested / skipped / silence / failed */
+  reports: AutoPlacementReport[];
+  /** placement metadata for canonical AudioClip conversion */
+  details: AutoPlacementDetail[];
+}
 
 export class RetrievalService {
   readonly freesound: FreesoundProvider;
@@ -59,6 +102,15 @@ export class RetrievalService {
 
   planForScene(ctx: SceneSoundContext): RetrievalIntent[] {
     return planScene(ctx, { density: this.settings.density });
+  }
+
+  planFromVideo(ctx: SceneSoundContext, events: SoundEventCandidate[], opts?: PlanEventsOptions): RetrievalIntent[] {
+    return planSoundEvents(ctx, events, {
+      density: this.settings.density,
+      timingToleranceMs: this.settings.timingToleranceMs,
+      eventConfidenceThreshold: this.settings.eventConfidenceThreshold,
+      ...opts,
+    });
   }
 
   /* ------------------------------------------------------ searching -- */
@@ -149,6 +201,7 @@ export class RetrievalService {
 
     // ---- CLAP rerank (advisory; only if a reranker is registered)
     const clapReranker = getClapReranker();
+    let clapUsed = false;
     const merged = clapReranker
       ? (
           await applyClapRerank(
@@ -160,6 +213,10 @@ export class RetrievalService {
           )
         ).candidates
       : results;
+    if (clapReranker) {
+      // cheap boolean: applyClapRerank returns used:true only when scores landed
+      clapUsed = results.some((c) => merged.some((m) => m.asset.soundId === c.asset.soundId && m.signals.some((s) => s.label === 'clap')));
+    }
 
     // apply license gate honestly: disallowed candidates stay visible but are
     // clearly flagged — the user may still inspect them (never auto-place).
@@ -171,7 +228,7 @@ export class RetrievalService {
       count: raw.reduce((a, r) => a + r.result.count, 0),
       page,
       candidates: merged,
-      clap: clapReranker ? 'metadata' : 'metadata', // refined to 'freesound-laion-clap' when similar() ran
+      clap: clapUsed ? 'freesound-laion-clap' : 'metadata',
       elapsedMs: Math.round(raw.reduce((a, r) => a + r.result.elapsedMs, 0)),
       error: allNotes.length ? allNotes.join(' · ') : null,
     };
@@ -223,18 +280,46 @@ export class RetrievalService {
     return this.pixabay;
   }
 
+  /* ------------------------------------------- transform estimation -- */
+
+  /**
+   * Conservative initial processing from scene context — a starting point
+   * only. Never destructive: transform lives on the clip, source is kept.
+   * Explicit planner transforms (e.g. the dread recipe) always win.
+   */
+  estimateTransform(intent: RetrievalIntent): TransformSpec {
+    if (intent.transform) return intent.transform;
+    if (intent.distance === 'far') {
+      // far-away machinery / ambience: lower gain, HF attenuation, more reverb
+      return { ...NO_TRANSFORM, gainDb: -6, lowpassHz: 5200, reverb: 0.28 };
+    }
+    if (intent.perspective === 'offscreen') {
+      return { ...NO_TRANSFORM, lowpassHz: 6500, gainDb: -5 };
+    }
+    if (isBedRole(intent.role)) {
+      // room tone / ambience: loop + crossfade, long fades handled at placement
+      return { ...NO_TRANSFORM, loop: true, crossfadeLoop: true };
+    }
+    if (intent.role === 'IMPACT' || intent.role === 'DOOR' || intent.role === 'KNOCK' || intent.role === 'METAL') {
+      // close impact: maintain transient, minimal reverb
+      return { ...NO_TRANSFORM, reverb: 0 };
+    }
+    return NO_TRANSFORM;
+  }
+
   /* -------------------------------------------------- clip factory --- */
 
   /**
-   * Place a retrieved asset as a split, editable SoundClip at a timeline
-   * position. Returns the clip after caching + provenance write.
+   * Place a retrieved asset as a split, editable clip at a timeline
+   * position. Returns a legacy SoundClip; `useStudio` converts it to the
+   * canonical AudioClip at the boundary.
    */
   async placeClip(opts: {
     sceneId: string;
     intent: RetrievalIntent;
     candidate: RankedCandidate;
     start: number;
-    transform?: SoundClip['transform'];
+    transform?: TransformSpec;
     gain?: number;
     pan?: number;
     projectId?: string;
@@ -258,6 +343,8 @@ export class RetrievalService {
     const clampDur = bed
       ? Math.min(dur, 90)
       : Math.min(dur, Math.max(0.5, opts.intent.maxDuration ?? 6));
+    // estimation is applied by the autonomous path (autoDesign); manual
+    // placement keeps intent transforms or a clean default
     const transform = opts.transform ?? opts.intent.transform ?? NO_TRANSFORM;
     const clip: SoundClip = {
       id: `C${Math.random().toString(36).slice(2, 10)}`,
@@ -305,67 +392,225 @@ export class RetrievalService {
   /* -------------------------------------------- auto sound design ---- */
 
   /**
-   * Run planner → search → gate → (suggest) | (auto place).
-   *  - SUGGEST: return top candidates per intent, place nothing.
-   *  - AUTO SAFE: place only match ≥ autoSafeThreshold AND license-ok.
-   *  - AUTO FULL: place match ≥ autoFullThreshold, everything editable.
-   *  AUTO FULL never flattens; clips remain separate + undoable.
+   * Run events → plan → search → gate → rank → (suggest) | (auto place).
+   *
+   *   SUGGEST    returns candidates per intent, places nothing.
+   *   AUTO SAFE  places only when event confidence ≥ eventConfidenceThreshold
+   *              AND best match ≥ autoSafeThreshold AND license-ok AND a
+   *              provider succeeded.
+   *   AUTO FULL  same, with lower match threshold; still never bypasses
+   *              license policy and never fills negative space.
+   *
+   * Returns a truthful report per intent — including WHY it was skipped.
    */
   async autoDesign(
     ctx: SceneSoundContext,
     projectId: string,
     mode: LibrarySettings['autoMode'],
     onProgress?: (msg: string) => void,
-  ): Promise<{ placed: SoundClip[]; suggestions: { intent: RetrievalIntent; candidates: RankedCandidate[] }[]; skipped: number }> {
+    opts: AutoDesignOptions = {},
+  ): Promise<AutoDesignResult> {
     const placed: SoundClip[] = [];
     const suggestions: { intent: RetrievalIntent; candidates: RankedCandidate[] }[] = [];
-    let skipped = 0;
-    const intents = this.planForScene(ctx);
-    const threshold = mode === 'auto-safe' ? this.settings.autoSafeThreshold : this.settings.autoFullThreshold;
+    const reports: AutoPlacementReport[] = [];
+    const details: AutoPlacementDetail[] = [];
+    const budget = { used: 0, cap: Math.max(1, this.settings.maxSearchesPerRun) };
 
-    for (const intent of intents) {
-      if (intent.isSilenceChoice) {
-        onProgress?.(`negative space: keeping ${ctx.title} quiet`);
+    const events = (opts.events ?? []).filter((e) => e.sceneId === ctx.sceneId || !e.sceneId);
+    const hasVideoEvents = events.length > 0;
+    const intents = hasVideoEvents
+      ? this.planFromVideo(ctx, events, opts.plan)
+      : this.planForScene(ctx);
+
+    const silence = intents.filter((i) => i.isSilenceChoice);
+    const actionable = intents.filter((i) => !i.isSilenceChoice);
+
+    for (const i of silence) {
+      reports.push({ intentId: i.id, role: i.role, query: i.query || '(silence)', status: 'silence', reason: i.reason });
+    }
+    if (hasVideoEvents && !actionable.length) {
+      onProgress?.(`negative space: no sound-producing event in ${ctx.title} — keeping it quiet`);
+    }
+
+    // bounded, prioritized search order (event condensation, never per-frame)
+    const prioritized = [...actionable].sort(
+      (a, b) =>
+        (b.priority * (b.eventConfidence ?? 0.8)) - (a.priority * (a.eventConfidence ?? 0.8)) ||
+        (a.detectedTimestamp ?? a.time ?? 0) - (b.detectedTimestamp ?? b.time ?? 0),
+    );
+    const searched = prioritized.slice(0, budget.cap);
+    for (const overflow of prioritized.slice(budget.cap)) {
+      reports.push({
+        intentId: overflow.id,
+        role: overflow.role,
+        eventTimestamp: overflow.detectedTimestamp ?? overflow.time ?? undefined,
+        placementTimestamp: overflow.placementTimestamp,
+        query: overflow.query,
+        status: 'skipped',
+        reason: `search budget (${budget.cap} per run) exceeded — event retained but not queried`,
+      });
+      onProgress?.(`budget: skipped ${overflow.query}`);
+    }
+
+    for (const intent of searched) {
+      const at = intent.placementTimestamp ?? intent.detectedTimestamp ?? (intent.time !== null ? intent.time + intent.offset : ctx.start + 0.5);
+      const baseReport = {
+        intentId: intent.id,
+        role: intent.role,
+        eventTimestamp: intent.detectedTimestamp ?? intent.time ?? undefined,
+        placementTimestamp: intent.placementTimestamp ?? at,
+        query: intent.query,
+      };
+
+      // low-confidence / ambiguous events stay suggestions in AUTO modes —
+      // never placed. AUTO FULL may lower the floor but never invents a
+      // sound with no evidence.
+      const conf = intent.eventConfidence ?? 1;
+      const confFloor = mode === 'auto-safe' ? this.settings.eventConfidenceThreshold : this.settings.eventConfidenceThreshold * 0.5;
+      if (mode !== 'off' && mode !== 'suggest' && (intent.suggestOnly || conf < confFloor)) {
+        const why = intent.suggestOnly
+          ? 'source is not named by the scene (ambiguous motion) — suggestion only'
+          : `event confidence ${conf.toFixed(2)} < ${confFloor.toFixed(2)}`;
+        reports.push({ ...baseReport, status: 'skipped', reason: `${why} (${intent.reason})` });
+        onProgress?.(`not auto-placed: ${intent.query} — ${why}`);
         continue;
       }
+
       onProgress?.(`search: ${intent.query}`);
-      const res = await this.search(intent);
+      const res = await this.searchWithAlternates(intent, budget);
       if (res.error && !res.candidates.length) {
+        reports.push({ ...baseReport, status: 'failed', reason: `provider unavailable: ${res.error}` });
         onProgress?.(`provider unavailable: ${res.error}`);
-        skipped++;
         continue;
       }
+      if (!res.candidates.length) {
+        reports.push({ ...baseReport, status: 'skipped', reason: `no candidates returned for "${intent.query}"` });
+        continue;
+      }
+
+      // honest transparency: disallowed candidates stay visible + flagged
+      suggestions.push({ intent, candidates: res.candidates.slice(0, 8) });
       const ok = res.candidates.filter((c) => c.licenseOk);
       if (!ok.length) {
-        onProgress?.(`no license-safe candidate for "${intent.query}" — skipping`);
-        skipped++;
+        reports.push({
+          ...baseReport,
+          status: 'skipped',
+          reason: `no license-safe candidate (policy ${this.settings.licensePolicy.mode}) — ${res.candidates[0]?.licenseReason ?? 'license gate rejected all'}`,
+        });
+        onProgress?.(`license gate: no safe candidate for "${intent.query}"`);
         continue;
       }
-      const suggestionsList = ok.slice(0, 6);
-      suggestions.push({ intent, candidates: suggestionsList });
 
-      if (mode === 'off') continue;
-      if (mode === 'suggest') continue; // nothing placed
+      if (mode === 'off' || mode === 'suggest') {
+        reports.push({ ...baseReport, status: 'suggested', reason: `${mode} mode — placed nothing`, match: ok[0].match });
+        continue;
+      }
 
       const best = ok[0];
-      if (!best || best.match < threshold) {
-        if (best && best.match < threshold) skipped++;
+      const matchFloor = mode === 'auto-safe' ? this.settings.candidateMatchThreshold : this.settings.autoFullThreshold;
+      if (best.match < matchFloor) {
+        reports.push({ ...baseReport, status: 'skipped', reason: `best candidate match ${best.match.toFixed(2)} < ${matchFloor.toFixed(2)} (${best.asset.title})`, match: best.match, asset: best.asset });
+        onProgress?.(`weak candidate: ${intent.query} best ${(best.match * 100).toFixed(0)}%`);
         continue;
       }
-      const start = intent.time !== null ? intent.time + intent.offset : ctx.start + 0.5;
+
+      const steps = intent.familySteps?.length ? intent.familySteps : [at];
+      const family = steps.length > 1;
+      // conservative automatic transform estimation is part of the autonomous
+      // video path; text-driven planning keeps its explicit recipes only
+      const transform = hasVideoEvents ? intent.transform ?? this.estimateTransform(intent) : intent.transform;
+      if (family) {
+        // ONE search → small variant family rotated across onsets
+        const variants = ok.filter((c, i, arr) => arr.findIndex((x) => x.asset.soundId === c.asset.soundId) === i).slice(0, 4);
+        const familyId = `fam-${intent.id}`;
+        for (let i = 0; i < steps.length; i++) {
+          const variant = variants[i % variants.length];
+          const clip = await this.placeClip({
+            sceneId: ctx.sceneId,
+            intent,
+            candidate: variant,
+            start: round3(steps[i]),
+            projectId,
+            transform,
+            familyId,
+            variantIndex: i,
+            gain: variantGain(i),
+            pan: variantPan(i),
+          });
+          await this.recordProvenance(clip, projectId);
+          placed.push(clip);
+          details.push({
+            clipId: clip.id,
+            role: clip.role,
+            eventTimestamp: steps[i],
+            placementTimestamp: round3(steps[i]),
+            eventConfidence: intent.eventConfidence,
+            searchQuery: intent.query,
+            eventEvidence: intent.eventEvidence,
+            eventKind: intent.eventKind,
+            eventMaterial: intent.material,
+            eventAction: intent.action,
+            eventEnvironment: intent.environment,
+            eventDistance: intent.distance,
+            eventPerspective: intent.perspective,
+            autoPlaced: true,
+          });
+          onProgress?.(`placed ${clip.name} @ ${clip.start.toFixed(2)}s (variant ${i + 1}/${steps.length})`);
+        }
+        reports.push({ ...baseReport, status: 'placed', reason: `${steps.length}-step family, ${variants.length} variant(s) rotated`, match: best.match, asset: best.asset, familySize: steps.length });
+        continue;
+      }
+
       const clip = await this.placeClip({
         sceneId: ctx.sceneId,
         intent,
         candidate: best,
-        start,
+        start: at,
         projectId,
-        transform: intent.transform,
+        transform,
       });
       await this.recordProvenance(clip, projectId);
       placed.push(clip);
+      details.push({
+        clipId: clip.id,
+        role: clip.role,
+        eventTimestamp: intent.detectedTimestamp ?? intent.time ?? undefined,
+        placementTimestamp: at,
+        eventConfidence: intent.eventConfidence,
+        searchQuery: intent.query,
+        eventEvidence: intent.eventEvidence,
+        eventKind: intent.eventKind,
+        eventMaterial: intent.material,
+        eventAction: intent.action,
+        eventEnvironment: intent.environment,
+        eventDistance: intent.distance,
+        eventPerspective: intent.perspective,
+        autoPlaced: true,
+      });
+      reports.push({ ...baseReport, status: 'placed', reason: `${best.asset.title} matched ${(best.match * 100).toFixed(0)}%`, match: best.match, asset: best.asset });
       onProgress?.(`placed ${clip.name} @ ${clip.start.toFixed(2)}s (match ${Math.round(clip.match * 100)}%)`);
     }
-    return { placed, suggestions, skipped };
+
+    return { placed, suggestions, skipped: reports.filter((r) => r.status === 'skipped' || r.status === 'failed').length, reports, details };
+  }
+
+  /** Search primary query; retry an alternate if the first yields no license-safe results. */
+  private async searchWithAlternates(intent: RetrievalIntent, budget: { used: number; cap: number }): Promise<RetrievalSearchResult> {
+    const first = await this.search(intent);
+    const hasSafe = first.candidates.some((c) => c.licenseOk);
+    if (hasSafe || !first.candidates.length || budget.used >= budget.cap) {
+      budget.used++;
+      return first;
+    }
+    const alt = intent.altQueries?.[0];
+    if (!alt) {
+      budget.used++;
+      return first;
+    }
+    budget.used += 2;
+    const altIntent = { ...intent, id: `${intent.id}-alt`, query: alt, reason: `${intent.reason} · alternate query "${alt}"` };
+    const second = await this.search(altIntent);
+    return { ...second, intent, count: second.count || first.count, error: second.error ?? first.error };
   }
 
   /* ---------------------------------------------- footstep family ---- */
@@ -390,21 +635,41 @@ export class RetrievalService {
    * Build the retrieval intent for FIND ALTERNATIVE on a placed clip.
    * Keeps the original semantic intent (role, time, duration fit) so the
    * replacement search recalls what the clip is FOR — not just its name.
+   * When the clip carries autonomous-analysis provenance, it is restored
+   * so alternative searches stay contextual.
    */
-  alternativeIntent(clip: SoundClip, idPrefix = 'alt'): RetrievalIntent {
-    return {
+  alternativeIntent(
+    clip: SoundClip,
+    idPrefix = 'alt',
+    provenance?: { query?: string; detectedTimestamp?: number; placementTimestamp?: number; eventConfidence?: number; material?: string; environment?: string; eventKind?: RetrievalIntent['eventKind']; distance?: RetrievalIntent['distance'] },
+  ): RetrievalIntent {
+    const base = this.settings.density;
+    void base;
+    const role = clip.role;
+    const isBed = isBedRole(role);
+    const intent: RetrievalIntent = {
       id: `${idPrefix}-${clip.id}`,
       sceneId: clip.sceneId,
-      role: clip.role,
-      query: clip.asset.tags.length ? clip.asset.tags.slice(0, 4).join(' ') : clip.name,
+      role,
+      query: provenance?.query ?? (clip.asset.tags.length ? clip.asset.tags.slice(0, 4).join(' ') : clip.name),
       altQueries: [clip.name, clip.asset.title],
       time: clip.start,
       offset: 0,
-      durationFit: clip.role === 'ROOM_TONE' || clip.role === 'DRONE' ? ('long' as const) : ('short' as const),
+      durationFit: isBed ? 'long' : role === 'MECHANICAL' || role === 'VEHICLE' ? 'medium' : 'short',
       priority: 0.9,
       allowSilence: false,
       reason: `find alternative for ${clip.name} (maintains original intent)`,
+      origin: 'alternative',
+      detectedTimestamp: provenance?.detectedTimestamp ?? clip.start,
+      placementTimestamp: provenance?.placementTimestamp ?? clip.start,
+      timingToleranceMs: this.settings.timingToleranceMs,
+      eventConfidence: provenance?.eventConfidence,
+      material: provenance?.material,
+      environment: provenance?.environment,
+      eventKind: provenance?.eventKind,
+      distance: provenance?.distance,
     };
+    return intent;
   }
 
   /**
@@ -426,6 +691,20 @@ export class RetrievalService {
 }
 
 /* ------------------------------------------------------- helpers ---- */
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
+/** deterministic variant variation (no Math.random → testable families) */
+function variantGain(i: number): number {
+  const jitter = ((i * 37) % 13) / 100; // 0.00 .. 0.12
+  return Math.max(0.6, Math.min(1.1, 0.9 - jitter * 0.4 + (i % 2 === 0 ? 0.04 : -0.03)));
+}
+
+function variantPan(i: number): number {
+  return Math.max(-0.5, Math.min(0.5, ((i * 53) % 41) / 100 - 0.2));
+}
 
 async function decodeToMono(blob: Blob): Promise<Float32Array | null> {
   try {
