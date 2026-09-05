@@ -36,6 +36,7 @@ python scripts/setup_models.py --list          # what's installed, what devices 
 python scripts/setup_models.py --core          # ACE-Step + CLAP
 python scripts/setup_models.py --ace-step
 python scripts/setup_models.py --stable-audio  # gated: needs HF_TOKEN + licence acceptance
+python scripts/setup_models.py --xclip         # X-CLIP semantic video analysis (~1.58 GB)
 ```
 
 Weights land in `checkpoints/` (git-ignored). `ffmpeg` is an optional

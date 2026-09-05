@@ -79,6 +79,40 @@ export function libraryStatusView(p: LibraryProviderStatus): StatusView {
   return { trust: 'unavailable', label: 'unavailable', detail: p.reason ?? 'not configured', tone: 'dim' };
 }
 
+/**
+ * X-CLIP is an analysis layer (not an audio provider), but it must use the
+ * same status ladder. `runtimeVerified` is only true after real X-CLIP
+ * inference processed video frames — never on weights-on-disk alone.
+ */
+export function analysisStatusView(a: { installed: boolean; ready: boolean; runtimeVerified: boolean; error?: string | null }): StatusView {
+  if (a.error) return { trust: 'failed', label: 'failed', detail: a.error, tone: 'tan' };
+  if (a.runtimeVerified) {
+    return {
+      trust: 'runtime-verified',
+      label: 'runtime verified',
+      detail: 'real X-CLIP inference processed video frames this session',
+      tone: 'brine',
+    };
+  }
+  if (a.ready) {
+    return {
+      trust: 'ready',
+      label: 'loaded · not verified',
+      detail: 'weights/deps present and model loadable — no real inference has run yet',
+      tone: 'tan',
+    };
+  }
+  if (a.installed) {
+    return {
+      trust: 'installed',
+      label: 'weights present · not loaded',
+      detail: 'checkpoint on disk but torch/transformers/Pillow are missing',
+      tone: 'tan',
+    };
+  }
+  return { trust: 'not-installed', label: 'not installed', detail: 'run the install command below', tone: 'dim' };
+}
+
 /** Capability chips: declared until proven. */
 export function capabilityEvidenceLabel(runtimeVerified: boolean): string {
   return runtimeVerified

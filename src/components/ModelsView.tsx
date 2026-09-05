@@ -8,6 +8,7 @@ import {
   Music4,
   Radar,
   RefreshCw,
+  ScanLine,
   ShieldAlert,
   Sparkles,
   Terminal,
@@ -21,8 +22,9 @@ import {
   type ModelsReport,
   type ProviderId,
   type ProviderStatus,
+  type XclipStatus,
 } from '../lib/providers';
-import { capabilityEvidenceLabel, capabilityEvidenceNote, statusView, type StatusView } from '../lib/status';
+import { analysisStatusView, capabilityEvidenceLabel, capabilityEvidenceNote, statusView, type StatusView } from '../lib/status';
 
 const ICON: Record<ProviderId, typeof Waves> = {
   'umbra-procedural': Waves,
@@ -159,6 +161,51 @@ function ProviderCard({ p, verified }: { p: ProviderStatus; verified: boolean })
   );
 }
 
+function XclipCard({ x }: { x: XclipStatus }) {
+  const v = analysisStatusView(x);
+  return (
+    <div className="glass rounded-xl p-3.5">
+      <div className="flex items-start gap-2.5">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
+          <ScanLine size={15} className={x.ready || x.runtimeVerified ? 'text-ember' : 'text-dim'} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate text-[12.5px] font-semibold text-bone">X-CLIP semantic video analysis</h3>
+            <span className={`chip ${CHIP_TONE[v.tone]}`} title={v.detail}>{v.label}</span>
+          </div>
+          <p className="mt-0.5 text-[10.5px] leading-relaxed text-dim">
+            {v.detail} — used only on meaningful pixel-detected event windows.
+          </p>
+        </div>
+      </div>
+      {x.sizeBytes != null && (
+        <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-white/[0.06] pt-2.5">
+          <div>
+            <dt className="eyebrow text-[8px]">Checkpoint</dt>
+            <dd className="tnum truncate text-[10.5px] text-ash" title={x.model ?? undefined}>{x.model ?? '—'}</dd>
+          </div>
+          <div>
+            <dt className="eyebrow text-[8px]">On disk</dt>
+            <dd className="tnum text-[10.5px] text-ash">{(x.sizeBytes / 1e9).toFixed(2)} GB</dd>
+          </div>
+        </div>
+      )}
+      {x.notes.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-1 border-t border-white/[0.06] pt-2.5">
+          {x.notes.map((n) => (
+            <li key={n} className="flex items-start gap-1.5 text-[10px] leading-relaxed text-dim">
+              <span className="mt-[5px] h-1 w-1 shrink-0 rounded-full bg-dim" />
+              {n}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!x.ready && x.installHint && <div className="mt-2"><Cmd>{x.installHint}</Cmd></div>}
+    </div>
+  );
+}
+
 export default function ModelsView({ studio }: { studio: Studio }) {
   const { generation } = studio;
   const [report, setReport] = useState<ModelsReport | null>(null);
@@ -287,6 +334,13 @@ export default function ModelsView({ studio }: { studio: Studio }) {
           <ProviderCard key={p.id} p={p} verified={generation.isVerified(p.id)} />
         ))}
       </div>
+
+      {/* -------------------------------------------- analysis models */}
+      {report?.xclip && (
+        <div className="mt-3">
+          <XclipCard x={report.xclip} />
+        </div>
+      )}
 
       <div className="glass mt-3 rounded-xl p-3.5">
         <span className="eyebrow mb-2 block">Installation</span>

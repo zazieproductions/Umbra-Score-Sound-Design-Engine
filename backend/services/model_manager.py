@@ -92,6 +92,10 @@ ACE_STEP_SUBMODELS: Dict[str, str] = {
 
 ACE_STEP_MAIN_REPO = "ACE-Step/Ace-Step1.5"
 
+# X-CLIP semantic video analysis (optional local model, MIT code/weights per card).
+XCLIP_CHECKPOINT_NAME = "xclip-base-patch32"
+XCLIP_REPO_ID = "microsoft/xclip-base-patch32"
+
 
 @dataclass
 class CheckpointInfo:
@@ -207,6 +211,7 @@ def _tracked_packages() -> List[tuple]:
         ("acestep", "ACE-Step 1.5 inference package"),
         ("peft", "LoRA / personalization (optional)"),
         ("scenedetect", "PySceneDetect cut detection (optional)"),
+        ("PIL", "Image frame decoding for X-CLIP semantic video analysis"),
     ]
 
 
@@ -225,5 +230,20 @@ def package_report() -> List[PackageInfo]:
     return out
 
 
+def xclip_checkpoint() -> CheckpointInfo:
+    """X-CLIP semantic video-analysis checkpoint on disk."""
+    p = checkpoints_root() / XCLIP_CHECKPOINT_NAME
+    return CheckpointInfo(
+        name=XCLIP_CHECKPOINT_NAME,
+        present=bool(p.is_dir() and any(p.iterdir())),
+        path=str(p) if p.exists() else None,
+        size_bytes=dir_size(p),
+        repo=XCLIP_REPO_ID,
+    )
+
+
 def model_report() -> ModelReport:
-    return ModelReport(checkpoints=ace_step_checkpoints(), packages=package_report())
+    return ModelReport(
+        checkpoints=ace_step_checkpoints() + [xclip_checkpoint()],
+        packages=package_report(),
+    )

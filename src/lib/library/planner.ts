@@ -11,6 +11,7 @@
 
 import type { RetrievalIntent, SoundDensity, SoundRole, SoundEventCandidate, SpottingEvent, SceneSoundContext } from './types';
 import { HORROR_DRONE_TRANSFORM, isBedRole } from './types';
+import { semanticEventKind, semanticQuery, semanticRole, topSemanticCandidate } from './xclip';
 
 let intentSeq = 0;
 const nid = () => `int${Date.now().toString(36)}${(intentSeq++).toString(36)}`;
@@ -236,17 +237,18 @@ export function planSoundEvents(
   // 1) beds first (room tone / ambience) — anchored at the actual activity
   const beds = new Set<SoundRole>();
   for (const ev of inScene) {
-    if (isBedRole(ev.suggestedRole) && !beds.has(ev.suggestedRole)) beds.add(ev.suggestedRole);
+    const role = effectiveRole(ev);
+    if (isBedRole(role) && !beds.has(role)) beds.add(role);
   }
   if (!beds.size && inScene.length && (hasAny(ctx, /interior|room|basement|hall|building/i))) beds.add('ROOM_TONE');
   for (const role of beds) {
-    const ev = inScene.find((e) => e.suggestedRole === role);
+    const ev = inScene.find((e) => effectiveRole(e) === role);
     if (!ev) continue;
     const base = ROLE_QUERIES[role];
-    const query = ev.query || base.q;
+    const query = semanticQuery(ev.semantic) ?? (ev.query || base.q);
     const int = mkIntent(ctx, role, query, ev.altQueries.length ? ev.altQueries : base.alts, ev.timestamp, 0, base.fit, 0.55 + ev.confidence * 0.4, false, `video bed: ${ev.evidence.join(' · ')}`, {
       origin: 'video-analysis',
-      eventKind: ev.event,
+      eventKind: semanticEventKind(ev.semantic) ?? ev.event,
       detectedTimestamp: ev.timestamp,
       placementTimestamp: ev.placementTimestamp ?? ev.timestamp,
       timingToleranceMs: tolerance,
@@ -258,13 +260,14 @@ export function planSoundEvents(
       distance: ev.distance,
       perspective: ev.perspective,
       suggestOnly: ev.ambiguous === true || ev.confidence < confidenceThreshold,
+      ...semanticExtras(ev),
     });
     intents.push(int);
     used.add(ev.id);
   }
 
   // 2) footstep families — one search per group
-  const steps = inScene.filter((e) => e.suggestedRole === 'FOOTSTEP' && !used.has(e.id));
+  const steps = inScene.filter((e) => effectiveRole(e) === 'FOOTSTEP' && !used.has(e.id));
   const stepGroups: SoundEventCandidate[][] = [];
   for (const ev of steps) {
     const g = stepGroups[stepGroups.length - 1];
@@ -276,10 +279,11 @@ export function planSoundEvents(
     const base = ROLE_QUERIES.FOOTSTEP;
     const confidence = Math.max(...group.map((e) => e.confidence));
     const allOnsets = group.map((e) => e.timestamp).sort((a, b) => a - b);
+    const query = semanticQuery(first.semantic) ?? (first.query || base.q);
     const int = mkIntent(
       ctx,
       'FOOTSTEP',
-      first.query || base.q,
+      query,
       first.altQueries.length ? first.altQueries : base.alts,
       allOnsets[0],
       0,
@@ -289,7 +293,7 @@ export function planSoundEvents(
       `video: ${group.length} contact(s) on the walk — one family, one search`,
       {
         origin: 'video-analysis',
-        eventKind: first.event,
+        eventKind: semanticEventKind(first.semantic) ?? first.event,
         detectedTimestamp: allOnsets[0],
         placementTimestamp: allOnsets[0],
         timingToleranceMs: tolerance,
@@ -302,6 +306,7 @@ export function planSoundEvents(
         perspective: first.perspective,
         familySteps: allOnsets,
         suggestOnly: group.some((e) => e.ambiguous) || confidence < confidenceThreshold,
+        ...semanticExtras(first),
       },
     );
     intents.push(int);
@@ -311,21 +316,25 @@ export function planSoundEvents(
   // 3) remaining events — dedupe by role+tolerance, keep the strongest
   const remaining = inScene.filter((e) => !used.has(e.id));
   for (const ev of remaining) {
-    const base = ROLE_QUERIES[ev.suggestedRole] ?? ROLE_QUERIES.MISC_FOLEY;
-    const fit = isBedRole(ev.suggestedRole) ? 'long' : ev.suggestedRole === 'MECHANICAL' || ev.suggestedRole === 'VEHICLE' || ev.suggestedRole === 'WATER' || ev.suggestedRole === 'WIND' ? 'medium' : 'short';
-    const dup = intents.find((i) => i.role === ev.suggestedRole && Math.abs((i.detectedTimestamp ?? i.time ?? 0) - ev.timestamp) < (3 * tolerance) / 1000);
+    const role = effectiveRole(ev);
+    const base = ROLE_QUERIES[role] ?? ROLE_QUERIES.MISC_FOLEY;
+    const fit = isBedRole(role) ? 'long' : role === 'MECHANICAL' || role === 'VEHICLE' || role === 'WATER' || role === 'WIND' ? 'medium' : 'short';
+    const dup = intents.find((i) => i.role === role && Math.abs((i.detectedTimestamp ?? i.time ?? 0) - ev.timestamp) < (3 * tolerance) / 1000);
     if (dup) {
       if ((ev.confidence ?? 0) > (dup.eventConfidence ?? 0)) {
-        dup.query = ev.query || dup.query;
+        dup.query = semanticQuery(ev.semantic) ?? (ev.query || dup.query);
         dup.altQueries = ev.altQueries.length ? ev.altQueries : dup.altQueries;
         dup.eventConfidence = ev.confidence;
+        dup.eventKind = semanticEventKind(ev.semantic) ?? dup.eventKind ?? ev.event;
         dup.suggestOnly = ev.ambiguous === true || ev.confidence < confidenceThreshold;
+        Object.assign(dup, semanticExtras(ev));
       }
       continue;
     }
-    const int = mkIntent(ctx, ev.suggestedRole, ev.query || base.q, ev.altQueries.length ? ev.altQueries : base.alts, ev.timestamp, 0, fit, 0.5 + ev.confidence * 0.5, false, `video: ${ev.evidence.join(' · ')}`, {
+    const query = semanticQuery(ev.semantic) ?? (ev.query || base.q);
+    const int = mkIntent(ctx, role, query, ev.altQueries.length ? ev.altQueries : base.alts, ev.timestamp, 0, fit, 0.5 + ev.confidence * 0.5, false, `video: ${ev.evidence.join(' · ')}`, {
       origin: 'video-analysis',
-      eventKind: ev.event,
+      eventKind: semanticEventKind(ev.semantic) ?? ev.event,
       detectedTimestamp: ev.timestamp,
       placementTimestamp: ev.placementTimestamp ?? ev.timestamp,
       timingToleranceMs: tolerance,
@@ -337,6 +346,7 @@ export function planSoundEvents(
       distance: ev.distance,
       perspective: ev.perspective,
       suggestOnly: ev.ambiguous === true || ev.confidence < confidenceThreshold,
+      ...semanticExtras(ev),
     });
     intents.push(int);
     used.add(ev.id);
@@ -370,6 +380,24 @@ export function planSoundEvents(
   return intents
     .sort((a, b) => b.priority - a.priority || (a.detectedTimestamp ?? a.time ?? 0) - (b.detectedTimestamp ?? b.time ?? 0))
     .slice(0, maxIntents);
+}
+
+/* --------------------------------------------- X-CLIP semantic helpers -- */
+
+/** X-CLIP advisory role override; falls back to the pixel-derived role. */
+function effectiveRole(ev: SoundEventCandidate): SoundRole {
+  return semanticRole(ev.semantic) ?? ev.suggestedRole;
+}
+
+/** Carry X-CLIP provenance into a retrieval intent (advisory only). */
+function semanticExtras(ev: SoundEventCandidate): Pick<RetrievalIntent, 'semanticLabels' | 'audioSetEvent' | 'semanticConfidence'> {
+  const top = topSemanticCandidate(ev.semantic);
+  if (!top) return { semanticLabels: undefined, audioSetEvent: undefined, semanticConfidence: undefined };
+  return {
+    semanticLabels: top.label ? [top.label] : undefined,
+    audioSetEvent: top.audioSet ?? undefined,
+    semanticConfidence: top.confidence,
+  };
 }
 
 /* --------------------------------------------------------- helpers -- */

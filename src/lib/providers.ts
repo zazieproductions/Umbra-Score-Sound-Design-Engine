@@ -84,12 +84,57 @@ export interface PackageInfo {
   purpose: string;
 }
 
+export interface XclipStatus {
+  id: 'xclip';
+  label: string;
+  model: string | null;
+  license: string;
+  installed: boolean;
+  ready: boolean;
+  runtimeVerified: boolean;
+  device: string | null;
+  deviceDetail: string | null;
+  sizeBytes: number | null;
+  notes: string[];
+  installHint: string | null;
+  error: string | null;
+}
+
 export interface ModelsReport {
   runtime: RuntimeSummary;
   providers: ProviderStatus[];
   checkpointsRoot: string;
   checkpoints: CheckpointInfo[];
   packages: PackageInfo[];
+  xclip: XclipStatus;
+}
+
+export interface XclipStats {
+  windowCount: number;
+  cacheHits: number;
+  inferenceCount: number;
+  analyzedInMs: number;
+  model: string;
+  device: string | null;
+}
+
+export interface XclipAnalysisResponse {
+  available: boolean;
+  modelId?: string;
+  device?: string | null;
+  events: import('./library/types').SoundEventCandidate[];
+  message: string | null;
+  installHint?: string | null;
+  stats?: XclipStats;
+}
+
+export interface SemanticEnrichmentBlock {
+  available: boolean;
+  modelId?: string;
+  device?: string | null;
+  message?: string | null;
+  stats?: XclipStats;
+  installHint?: string | null;
 }
 
 export interface GenerationJob {
@@ -328,6 +373,43 @@ export const backend = {
     return request<{ available: boolean; results: StoredAudio[]; message?: string }>('/api/search', {
       method: 'POST',
       body: JSON.stringify({ query, limit }),
+    });
+  },
+
+  async xclipStatus(): Promise<XclipStatus> {
+    const r = await request<{ xclip: XclipStatus }>('/api/analysis/xclip/status');
+    return r.xclip;
+  },
+
+  async analyzeEventsWithSemantics(payload: {
+    path: string;
+    fps?: number;
+    maxFrames?: number;
+    sceneId?: string;
+    sceneStart?: number;
+    title?: string;
+    tags?: string[];
+    summary?: string;
+    windowSeconds?: number;
+    topK?: number;
+    frames?: number;
+  }): Promise<import('./library/types').SoundEventAnalysis & { semantic?: SemanticEnrichmentBlock }> {
+    return request<import('./library/types').SoundEventAnalysis & { semantic?: SemanticEnrichmentBlock }>('/api/analysis/events', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, includeSemantics: true }),
+    });
+  },
+
+  async analyzeSemantics(payload: {
+    path: string;
+    events: import('./library/types').SoundEventCandidate[];
+    windowSeconds?: number;
+    topK?: number;
+    frames?: number;
+  }): Promise<XclipAnalysisResponse> {
+    return request<XclipAnalysisResponse>('/api/analysis/xclip', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 

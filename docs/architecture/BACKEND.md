@@ -27,7 +27,7 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | `services/device.py` | Real device detection (CUDA/MPS/CPU via actual probes). Returns `None` when unknown — the UI shows nothing rather than a plausible number. | Anything else |
 | `services/generation_jobs.py` | Async job queue with cancellation. `succeeded` is reachable only with decoded audio on disk. | Routing |
 | `services/model_manager.py` | Checkpoint discovery (size on disk), package probing, Models-view report. Only reports what exists. | Downloads (see `scripts/setup_models.py`) |
-| `tests/` | 57 tests: real-audio contract, capability honesty, payload mapping, routing. No model downloads. | — |
+| `tests/` | 91 tests: real-audio contract, capability honesty, payload mapping, routing, X-CLIP analysis. No model downloads. | — |
 
 ## API map (`app.py`)
 

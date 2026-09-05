@@ -66,6 +66,7 @@ Models (weights are never committed; fetched from official sources):
 ```bash
 python scripts/setup_models.py --list
 python scripts/setup_models.py --core
+python scripts/setup_models.py --xclip   # optional semantic video analysis (~1.58 GB)
 ```
 
 Setup details, troubleshooting: [`docs/development/SETUP.md`](docs/development/SETUP.md).
@@ -79,6 +80,7 @@ Setup details, troubleshooting: [`docs/development/SETUP.md`](docs/development/S
 | **Stable Audio Open** | Physical/environmental sound | Local Python |
 | **MMAudio** | Foley synchronised to picture | Local Python |
 | **CLAP** | Semantic search over *your* library (embeddings, not generation) | Local Python |
+| **X-CLIP** | Semantic *video* interpretation: WHAT a pixel-detected event likely represents (advisory to retrieval) | Local Python (optional) |
 | **Library retrieval** | Freesound + user library, ranked, license-gated, provenance-kept | Browser + IndexedDB |
 
 Routing boundaries, capability honesty, and the status ladder
@@ -91,8 +93,9 @@ Routing boundaries, capability honesty, and the status ladder
 | --- | --- |
 | Procedural engine, timeline, unified clips, mix + offline render | ✅ working |
 | Library retrieval (ranking, license/provenance, credits) | ✅ 25/25 frontend tests (mocked HTTP) |
-| Backend registry, audio store, jobs, analysis | ✅ 62 backend tests, no downloads |
+| Backend registry, audio store, jobs, analysis + X-CLIP layer | ✅ 91 backend tests, no downloads |
 | ACE-Step / Stable Audio / MMAudio / CLAP inference | ✅ plumbed — `RUNTIME VERIFIED` only on a machine with weights + deps (not yet in this environment) |
+| X-CLIP semantic video analysis | ✅ plumbed + mock-tested — NOT runtime-verified here (no torch/weights/ffmpeg); see [`docs/development/XCLIP.md`](docs/development/XCLIP.md) |
 
 Live status briefing: [`docs/ai/CURRENT_STATE.md`](docs/ai/CURRENT_STATE.md).
 What mocked tests do and do not prove: [`docs/development/TESTING.md`](docs/development/TESTING.md).

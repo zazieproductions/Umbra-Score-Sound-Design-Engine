@@ -10,6 +10,11 @@ transformers>=4.51.0,<4.58.0
 # --- CLAP (semantic audio search) -------------------------------------------
 # Uses transformers' ClapModel; no extra package required beyond the above.
 
+# --- X-CLIP (semantic video analysis) ---------------------------------------
+# Uses transformers' XCLIPModel + a local ffmpeg binary for frame sampling.
+# Weights are fetched with `python scripts/setup_models.py --xclip`.
+Pillow>=10.0.0
+
 # --- PySceneDetect (real cut detection) -------------------------------------
 scenedetect[opencv]>=0.6.4
 

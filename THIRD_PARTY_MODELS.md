@@ -72,6 +72,22 @@ before commercial use.
 
 ---
 
+## X-CLIP — semantic video analysis (optional)
+
+| | |
+| --- | --- |
+| Role in Umbra | "What does this event window represent" for Foley/environmental sound retrieval — used *on top of* the pixel motion detector, never instead of it |
+| Model | `microsoft/xclip-base-patch32` on Hugging Face |
+| Weights licence | **MIT** per the model card (re-check before commercial use) |
+| Approx. size | ~1.58 GB |
+| Install | `python scripts/setup_models.py --xclip` |
+| Gated | No |
+
+X-CLIP produces **probabilistic semantic interpretation**, not guaranteed
+object/action recognition. It only analyses meaningful event windows produced
+by Umbra's existing pixel analyzer, and its results are advisory to retrieval.
+Full details: [`docs/development/XCLIP.md`](./docs/development/XCLIP.md).
+
 ## CLAP — semantic audio search
 
 | | |
@@ -112,6 +128,7 @@ Approximate on-disk footprint, so you can plan before downloading. `scripts/setu
 | Stable Audio Open 1.0 | ~1.5 GB |
 | MMAudio | ~2 GB |
 | CLAP | ~1 GB |
+| X-CLIP (`microsoft/xclip-base-patch32`) | ~1.58 GB |
 
 ## Before you use any of these commercially
 
@@ -134,6 +151,7 @@ checkpoints/            # default download root, git-ignored
   stable-audio/
   mmaudio/
   clap/
+  xclip-base-patch32/
 ```
 
 Override with `--dir` on `scripts/setup_models.py` or the `UMBRA_CHECKPOINT_DIR` environment
