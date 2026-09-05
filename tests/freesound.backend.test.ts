@@ -35,7 +35,6 @@ const BASE_STATUS: FreesoundStatus = {
   configured: true,
   connected: true,
   keySource: 'environment:FREESOUND_API_KEY',
-  keyHint: 'sha256:0f1e2d3c4b5a',
   oauth: { configured: false, quality: 'preview' },
   apiBase: 'https://freesound.org/apiv2',
   probed: true,
@@ -115,8 +114,8 @@ describe('GET /api/integrations/freesound/status', () => {
     expect(status.configured).toBe(true);
     expect(status.connected).toBe(true);
     expect(status.keySource).toBe('environment:FREESOUND_API_KEY');
-    // the fingerprint is not the key, and the key is nowhere in the payload
-    expect(status.keyHint).toMatch(/^sha256:[0-9a-f]{12}$/);
+    // nothing derived from the key is published, and the key is nowhere in the payload
+    expect('keyHint' in status).toBe(false);
     expect(JSON.stringify(status)).not.toMatch(/api[_-]?key"\s*:\s*"/i);
     expect(calls[0]).toBe(`${FREESOUND_API}/status?probe=always`);
   });
@@ -144,7 +143,6 @@ describe('GET /api/integrations/freesound/status', () => {
         configured: false,
         connected: null,
         keySource: null,
-        keyHint: null,
         probed: false,
         reason: 'No Freesound API key configured on the backend (FREESOUND_API_KEY is unset).',
         hint: 'Copy .env.example to .env and set FREESOUND_API_KEY.',
@@ -237,8 +235,7 @@ describe('search routes through the backend and preserves provenance', () => {
           ...BASE_STATUS,
           configured: false,
           connected: null,
-          keyHint: null,
-          probed: false,
+            probed: false,
           reason: 'No Freesound API key configured on the backend (FREESOUND_API_KEY is unset).',
         });
       }

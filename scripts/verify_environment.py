@@ -128,7 +128,7 @@ def collect() -> dict:
     return {
         "freesound": {
             "configured": bool(key),
-            "keyHint": fs.key_hint(key),
+            "keySource": "environment:FREESOUND_API_KEY" if key else None,
             "apiBase": fs.api_base(),
             "oauth": bool(fs.oauth_token()),
             "envFile": str(env_file) if env_file else None,
@@ -198,7 +198,7 @@ def render(data: dict) -> int:
     _section("Freesound integration (key stays on the server)")
     fsx = data["freesound"]
     if fsx["configured"]:
-        print(f"  {OK} FREESOUND_API_KEY set ({fsx['keyHint']}) — backend will authenticate")
+        print(f"  {OK} FREESOUND_API_KEY set ({fsx['keySource']}) — backend will authenticate")
         print(f"      original-quality download: {'OAuth2 token present' if fsx['oauth'] else 'not configured (previews only)'}")
     else:
         print(f"  {MISSING} FREESOUND_API_KEY not set — library retrieval will report \"not configured\"")

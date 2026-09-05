@@ -485,8 +485,8 @@ export interface FreesoundConnection {
   configured: boolean;
   /** true = key accepted · false = key rejected · null = unknown (not probed / unreachable). */
   connected: boolean | null;
-  /** Non-reversible fingerprint of the key, e.g. `sha256:1a2b3c4d5e6f`. */
-  keyHint: string | null;
+  /** Where the backend read the key from, e.g. `environment:FREESOUND_API_KEY`. */
+  keySource: string | null;
   /** `preview` until the backend also holds an OAuth2 token. */
   quality: 'preview' | 'original';
   /** Human-readable reason — the backend's own words when something is off. */
@@ -501,7 +501,7 @@ export interface FreesoundConnection {
 export const EMPTY_FREESOUND_CONNECTION: FreesoundConnection = {
   configured: false,
   connected: null,
-  keyHint: null,
+  keySource: null,
   quality: 'preview',
   reason: null,
   hint: null,

@@ -121,9 +121,7 @@ export function FreesoundSettings({ studio }: { studio: Studio }) {
             <dt className="text-dim">key</dt>
             <dd className="text-ash">
               {conn.configured ? (
-                <>
-                  set on the backend · fingerprint <span className="text-bone">{conn.keyHint ?? '—'}</span>
-                </>
+                <span className="text-bone">set on the backend ({conn.keySource ?? 'environment'})</span>
               ) : (
                 <span className="text-tan">missing — add FREESOUND_API_KEY to .env</span>
               )}

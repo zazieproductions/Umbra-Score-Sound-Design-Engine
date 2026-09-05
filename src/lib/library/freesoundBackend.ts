@@ -55,9 +55,8 @@ export interface FreesoundStatus {
   configured: boolean;
   /** true = key accepted · false = key rejected · null = unknown/not probed. */
   connected: boolean | null;
+  /** Where the backend read the key from — never the key itself. */
   keySource: string | null;
-  /** Non-reversible fingerprint, e.g. `sha256:1a2b3c4d5e6f`. */
-  keyHint: string | null;
   oauth: { configured: boolean; quality: 'preview' | 'original' };
   apiBase: string;
   probed: boolean;

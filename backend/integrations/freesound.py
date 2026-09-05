@@ -15,9 +15,10 @@ Contract
 --------
 * The API key is read from the environment only (``FREESOUND_API_KEY``),
   optionally via the repo-root ``.env``. It is never written to disk, never
-  logged, never returned in a response — only a salted-position-free
-  ``sha256`` fingerprint is exposed so two machines can tell whether they
-  are running the same key.
+  logged, never returned in a response.
+* Nothing derived from the key is published either — no fingerprint, no hash,
+  no prefix, not even its length. Callers learn whether a key is configured
+  and where it was read from, and nothing more.
 * Every failure is honest. Missing key → ``not_configured``. Rejected key →
   ``unauthorized``. No code path fabricates, caches-stale-substitutes,
   or falls back to "demo" results.
@@ -40,7 +41,6 @@ placed in a URL, so it cannot leak into logs or referrers).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import time
@@ -186,22 +186,6 @@ def _extra_media_hosts() -> Sequence[str]:
     return tuple(h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip())
 
 
-def key_hint(key: Optional[str]) -> Optional[str]:
-    """A non-reversible fingerprint so two runs can be compared safely.
-
-    Never returns any part of the key itself. This is an *identifier*, not a
-    password verifier: nothing is ever recovered from it, it is never stored,
-    and the clear-text key exists only in the process environment — so the
-    "slow hash required for password storage" concern does not apply here
-    (and an expensive KDF would be pointless: the input never leaves memory).
-    """
-    if not key:
-        return None
-    # codeql[py/weak-sensitive-data-hashing] -- identifier fingerprint, not password storage
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
-    return f"sha256:{digest}"
-
-
 def describe_credentials() -> Dict[str, Any]:
     """Everything the browser is allowed to know about the credential."""
     key = api_key()
@@ -209,7 +193,6 @@ def describe_credentials() -> Dict[str, Any]:
     return {
         "configured": bool(key),
         "keySource": f"environment:{API_KEY_ENV}" if key else None,
-        "keyHint": key_hint(key),
         "oauth": {
             "configured": bool(oauth),
             "quality": "original" if oauth else "preview",
@@ -596,8 +579,9 @@ def get_client(*, transport: Optional[httpx.AsyncBaseTransport] = None) -> Frees
 
 
 def _probe_cache_key(client: Optional["FreesoundClient"] = None) -> str:
+    """Cache probes per API base — never keyed on the credential itself."""
     client = client or get_client()
-    return f"{client.base_url}|{key_hint(client.key)}"
+    return f"{client.base_url}|{'key' if client.key else 'none'}"
 
 
 def cached_probe(client: Optional["FreesoundClient"] = None) -> Optional[Dict[str, Any]]:
@@ -630,8 +614,8 @@ async def status(
         "provider": "freesound",
         "configured": has_key,
         "connected": None,
+        # the variable the backend read the key from — never the key itself
         "keySource": f"environment:{API_KEY_ENV}" if has_key else None,
-        "keyHint": key_hint(client.key),
         "oauth": {
             "configured": bool(client.oauth),
             "quality": "original" if client.oauth else "preview",

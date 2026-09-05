@@ -12,8 +12,9 @@ Routes (all under ``/api/integrations/freesound``):
 
 Two promises hold for every route:
 
-1. **The credential never appears in a response.** Status reports
-   ``configured`` / ``connected`` and a sha256 fingerprint — never the key.
+1. **Nothing about the credential appears in a response.** Status reports
+   ``configured`` / ``connected`` and where the key was read from — never the
+   key, never a hash or fingerprint of it.
 2. **No silent substitution.** When the key is missing or rejected the route
    returns an explicit error code (``not_configured`` → 503,
    ``unauthorized`` → 502). Nothing here invents results.

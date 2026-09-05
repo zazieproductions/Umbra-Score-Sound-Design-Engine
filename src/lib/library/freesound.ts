@@ -204,7 +204,7 @@ export class FreesoundProvider implements SoundLibraryProvider {
     }
   }
 
-  /** Raw backend status (quality level, key fingerprint) for the settings UI. */
+  /** Raw backend status (quality level, key source) for the settings UI. */
   remoteStatus(): FreesoundStatus | null {
     return this.lastRemote;
   }

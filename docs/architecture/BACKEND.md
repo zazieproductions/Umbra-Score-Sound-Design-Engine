@@ -45,7 +45,7 @@ The Freesound routes live in `integrations/router.py` and are the **only** way
 the browser reaches Freesound. The API key is read from the environment
 (`FREESOUND_API_KEY`, via a git-ignored `.env`) inside `integrations/` and is
 never returned, logged, or forwarded: responses carry `configured` /
-`connected` and a sha256 fingerprint only.
+`connected` and the source variable name — nothing derived from the key.
 
 ## Rules for changing the backend
 

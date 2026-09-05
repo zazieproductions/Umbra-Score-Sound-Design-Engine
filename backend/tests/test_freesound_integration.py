@@ -167,7 +167,9 @@ def test_status_not_configured_is_honest(client: TestClient):
     assert ".env" in (body["hint"] or "")
     # a misconfigured integration must never look available
     assert body["capabilities"]["search"] is True  # capability of the integration
-    assert body["keyHint"] is None
+    # nothing derived from a credential is published
+    assert "keyHint" not in body
+    assert TEST_KEY not in json.dumps(body)
 
 
 def test_status_connected_when_key_accepted(isolated_env, client: TestClient):
@@ -182,7 +184,6 @@ def test_status_connected_when_key_accepted(isolated_env, client: TestClient):
     assert body["configured"] is True
     assert body["connected"] is True
     assert body["keySource"] == "environment:FREESOUND_API_KEY"
-    assert body["keyHint"].startswith("sha256:")
     assert body["oauth"] == {"configured": False, "quality": "preview"}
     assert body["capabilities"]["originalDownload"] is False
     # the secret itself must never be echoed

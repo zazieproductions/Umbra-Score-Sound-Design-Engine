@@ -82,7 +82,7 @@ python3 -m venv .venv
 Startup logs tell you the truth without ever printing the key:
 
 ```
-freesound integration: key configured (sha256:49d45084453d)
+freesound integration: key configured
 freesound integration: NOT configured (set FREESOUND_API_KEY in .env to enable retrieval)
 ```
 
@@ -115,6 +115,11 @@ curl -s http://localhost:5173/api/integrations/freesound/status | python3 -m jso
 ```
 
 Reading the answer:
+
+Nothing derived from the key is ever published — not the value, not a hash or
+fingerprint, not even its length. The status payload carries `configured`,
+`connected` and `keySource` (which environment variable it came from) and
+nothing more.
 
 | `configured` | `connected` | Meaning |
 | --- | --- | --- |

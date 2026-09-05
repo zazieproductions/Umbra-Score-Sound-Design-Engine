@@ -127,7 +127,7 @@ export function useStudio() {
     setFreesoundConnection({
       configured: remote?.configured ?? false,
       connected: remote?.connected ?? null,
-      keyHint: remote?.keyHint ?? null,
+      keySource: remote?.keySource ?? null,
       quality: remote?.oauth.quality ?? 'preview',
       reason: status.reason ?? remote?.reason ?? null,
       hint: remote?.hint ?? null,
