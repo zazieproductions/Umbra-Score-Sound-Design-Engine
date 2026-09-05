@@ -214,7 +214,15 @@ export class BackendOfflineError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * The single browser→backend request helper. Relative URLs only — the Vite
+ * dev server (and any same-origin deployment) proxies `/api` to the Python
+ * service, so the browser never talks to another origin.
+ *
+ * Exported for the integration clients (e.g. the Freesound status/configure
+ * calls) so every backend call shares one boundary and one offline story.
+ */
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {

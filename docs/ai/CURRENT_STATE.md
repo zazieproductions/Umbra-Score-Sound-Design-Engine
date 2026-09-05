@@ -38,7 +38,7 @@ adapters, scene+spotting planner, video/waveform analysis, audio store
 | stable-audio | Validation adapter | NOT runtime-verified here |
 | mmaudio | Adapter, real-or-UNAVAILABLE | NOT runtime-verified here |
 | clap | Embeddings/search adapter | NOT runtime-verified here |
-| library (Freesound/user/Pixabay) | Retrieval subsystem | Verified at plumbing level: 19/19 mocked acceptance tests |
+| library (Freesound/user/Pixabay) | Retrieval subsystem; Freesound auth proxied through the backend | Verified at plumbing level: mocked acceptance + security tests both sides of the wire; live freesound.org verification is the documented manual gate (FREESOUND_LIVE_ACCEPTANCE.md) |
 
 ## Runtime status
 
@@ -48,14 +48,17 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 123 (`npm test`) — 19 retrieval acceptance + 6 architecture
+- Frontend: 148 (`npm test`) — 20 retrieval acceptance + 6 Freesound
+  frontend-security (no secrets in requests/persistence, safe status shape,
+  OAuth body) + 6 architecture
   invariants + 20 quality-measurement units + 6 rendered gates exercising the
   real engine through headless Web Audio (4 audio-QA + 2 stem-delivery
   equivalence: shared frameCount + Σ-stems-null on genuine convolvers;
   `node-web-audio-api`, skip-not-fail when the addon cannot load) +
   72 export-delivery (clock 6, stemPlan 27, kernel A/B/C/G 8, WAV/BWF 10,
   manifest 6, preflight+ZIP 10, loudness/boundaries 5).
-- Backend: 66 (`pytest backend/tests -q`), no downloads
+- Backend: 101 (`pytest backend/tests -q`), no downloads — includes 27
+  backend-managed-Freesound security tests (all Freesound HTTP mocked)
 - `tsc -b` clean · `eslint` clean · `vite build` clean
 
 ## Audio quality gates
@@ -81,7 +84,10 @@ oscillators across all pitched/transient voices (no fold-back aliasing).
 - Backend optional extras (torch, diffusers, CLAP, PySceneDetect) not installed
   in lightweight envs — providers honestly report unavailable.
 - `ffmpeg` external binary required for video metadata/thumbnails.
-- Live Freesound calls need a user token (in-app settings, IndexedDB).
+- Freesound search needs the local backend running (it holds the
+  credentials); procedural + user-library retrieval still work without it.
+  Live freesound.org verification has not been executed in this environment
+  (no egress route) — see docs/development/FREESOUND_LIVE_ACCEPTANCE.md.
 - Legacy `SoundClip` still present at the retrieval boundary (compat shims in
   `src/lib/types.ts`); new code must use `AudioClip`.
 - Browser cache (IndexedDB) durability is best-effort; timeline clips are the
@@ -93,8 +99,9 @@ See `docs/TECH_DEBT.md` for the register (IDs, risk, safe next steps).
 
 ## Recent architectural decisions
 
-- ADRs 0001–0004: hybrid split, unified clip, procedural first-class,
-  retrieval provenance (see `docs/decisions/`).
+- ADRs 0001–0006: hybrid split, unified clip, procedural first-class,
+  retrieval provenance, backend-managed Freesound credentials (see
+  `docs/decisions/`).
 - Historical design prompt moved to `docs/history/` — not a spec.
 - `npm run verify` (typecheck + lint + tests) is the pre-PR gate.
 

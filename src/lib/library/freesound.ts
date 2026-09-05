@@ -4,7 +4,7 @@
  *  Official APIv2 only. No scraping, no mirroring. Verified against the
  *  current documentation (2026-09):
  *
- *    search        GET /apiv2/search/            (token query/header)
+ *    search        GET /apiv2/search/            (API key)
  *                  replaces the deprecated /apiv2/search/text/,
  *                  which still redirects — we call the current one.
  *    sound         GET /apiv2/sounds/<id>/       (fields param)
@@ -13,6 +13,14 @@
  *    download      GET /apiv2/sounds/<id>/download/   OAuth2 Bearer only
  *    previews      returned in `previews` object — no OAuth2 needed
  *
+ *  SECURITY MODEL: the browser never holds a Freesound credential. Every
+ *  authenticated call above is routed through the Umbra backend
+ *  (`/api/library/freesound/...`), which attaches the server-stored key or
+ *  OAuth2 token when it talks to freesound.org. The provider still owns
+ *  asset mapping, licensing and provenance — the retrieval pipeline
+ *  (planner → provider search → license gate → ranking → CLAP rerank →
+ *  cache → AudioClip) is unchanged.
+ *
  *  Licensing: the API returns `license` as one of
  *    "Creative Commons 0" | "Attribution" | "Attribution NonCommercial"
  *  We map those strings to classes; we never guess a license from a file
@@ -20,7 +28,6 @@
  * ==================================================================== */
 
 import type {
-  FreesoundCredentials,
   LibraryAsset,
   LicenseClass,
   ProviderCapabilities,
@@ -29,10 +36,10 @@ import type {
   RetrievalSearchResult,
 } from './types';
 import type { PreviewFetch, SearchOptions, SoundLibraryProvider } from './provider';
+import type { FreesoundRuntime } from './freesoundBackend';
 
-const API = 'https://freesound.org/apiv2';
-/** Current search endpoint (post Nov-2025 deprecation of /search/text/). */
-const SEARCH_PATH = '/search/';
+/** Backend proxy prefix — same origin, proxied to the local Python service. */
+const API = '/api/library/freesound';
 
 /** Fields we request — keeps payloads small, includes everything UMBRA needs. */
 const SEARCH_FIELDS = [
@@ -171,20 +178,42 @@ export class FreesoundProvider implements SoundLibraryProvider {
     offline: false,
   };
 
-  constructor(private creds: () => FreesoundCredentials) {}
+  /** Runtime state is the SAFE integration status — it contains no secrets. */
+  constructor(private runtime: () => FreesoundRuntime) {}
 
   status(): ProviderStatus {
-    const c = this.creds();
-    const tokenOk = c.apiToken.trim().length > 0;
-    const oauthOk = c.accessToken.trim().length > 0 && c.expiresAt > Date.now();
+    const rt = this.runtime();
+    if (!rt.backendOnline) {
+      return {
+        provider: this.id,
+        label: this.label,
+        online: false,
+        ready: false,
+        reason:
+          'Backend-managed integration — the Umbra backend is not reachable. Start it with scripts/run_backend.py; the API key is configured there (Settings → Sound Libraries), never in the browser.',
+        capabilities: this.capabilities,
+      };
+    }
+    const s = rt.status;
     let reason: string | null = null;
-    if (!tokenOk) reason = 'No API token configured — enter it in Settings → Sound Libraries → Freesound (token auth covers search + preview).';
-    else if (!oauthOk) reason = 'Preview workflow ready. OAuth2 (original quality) not configured yet.';
+    if (!s.configured) {
+      reason = s.error ?? 'Freesound is not configured on the backend — configure it in Settings → Sound Libraries.';
+    } else if (s.verification === 'failed' && s.error) {
+      reason = s.error;
+    } else if (s.verification !== 'verified') {
+      reason = 'Credentials stored on the backend but not verified yet — run Test Connection in Settings → Sound Libraries.';
+    } else if (!s.searchAvailable) {
+      reason = 'OAuth2 connected, but no API key is stored — search needs the API key (Settings → Sound Libraries).';
+    } else if (!s.oauthAvailable) {
+      reason = s.tokenExpired
+        ? 'OAuth2 access token expired — refresh or reconnect in Settings → Sound Libraries. Preview workflow unaffected.'
+        : 'Preview workflow ready. OAuth2 (original quality) not connected yet.';
+    }
     return {
       provider: this.id,
       label: this.label,
       online: true,
-      ready: tokenOk,
+      ready: s.searchAvailable && s.verification !== 'failed',
       reason,
       capabilities: this.capabilities,
     };
@@ -196,29 +225,39 @@ export class FreesoundProvider implements SoundLibraryProvider {
 
   /* ------------------------------------------------------------ HTTP -- */
 
-  private async call<T>(path: string, params: Record<string, string | undefined> = {}, init?: RequestInit): Promise<T> {
-    const c = this.creds();
-    const url = new URL(`${API}${path}`);
+  /**
+   * Call the Umbra backend's Freesound proxy. The request carries NO
+   * credential of any kind — the backend holds the key and the OAuth2
+   * token. That is the whole point of this provider layer.
+   */
+  private async call<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+    const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== '' && v !== null) url.searchParams.set(k, v);
+      if (v !== undefined && v !== '' && v !== null) qs.set(k, v);
     }
-    // token via query param (docs) — avoids Authorization header entirely
-    if (c.apiToken) url.searchParams.set('token', c.apiToken);
-    const res = await fetch(url.toString(), init);
+    const url = `${API}${path}${qs.toString() ? `?${qs.toString()}` : ''}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: { Accept: 'application/json' } });
+    } catch {
+      throw new Error('The Umbra backend is not reachable — Freesound needs it (it holds the credentials).');
+    }
     if (!res.ok) {
       let detail = '';
+      let hint = '';
       try {
-        const j = (await res.json()) as { detail?: string; error?: string };
-        detail = j.detail ?? j.error ?? '';
+        const j = (await res.json()) as { error?: string; detail?: string; hint?: string };
+        detail = j.error ?? j.detail ?? '';
+        hint = j.hint ?? '';
       } catch {
         /* body not JSON */
       }
       const err = new Error(
-        res.status === 401 || res.status === 403
-          ? `Freesound authentication failed (${res.status})${detail ? `: ${detail}` : ''}.`
+        res.status === 409
+          ? `${detail || 'Freesound is not configured on the backend.'}${hint ? ` — ${hint}` : ''}`
           : res.status === 429
-            ? `Freesound rate limit reached (${res.status}). Wait a moment and try again.`
-            : `Freesound API error ${res.status}${detail ? `: ${detail}` : ''}.`,
+            ? 'Freesound rate limit reached. Wait a moment and try again.'
+            : `Freesound request failed (${res.status})${detail ? `: ${detail}` : ''}${hint ? ` — ${hint}` : ''}`,
       );
       (err as Error & { status?: number }).status = res.status;
       throw err;
@@ -242,7 +281,7 @@ export class FreesoundProvider implements SoundLibraryProvider {
     // foley requests instead of mood sentences
     const q = expandQuery(query, intent.role);
     try {
-      const data = await this.call<FsSearchResponse>(SEARCH_PATH, {
+      const data = await this.call<FsSearchResponse>('/search', {
         query: q,
         fields: SEARCH_FIELDS,
         page: String(page),
@@ -269,7 +308,7 @@ export class FreesoundProvider implements SoundLibraryProvider {
       filters.push(`duration:[${lo} TO ${hi}]`);
     }
     try {
-      const data = await this.call<FsSearchResponse>(SEARCH_PATH, {
+      const data = await this.call<FsSearchResponse>('/search', {
         query: expandQuery(intent.query, intent.role),
         fields: SEARCH_FIELDS,
         page: String(page),
@@ -289,7 +328,7 @@ export class FreesoundProvider implements SoundLibraryProvider {
   async similar(asset: LibraryAsset, page = 1): Promise<RetrievalSearchResult> {
     const started = performance.now();
     try {
-      const data = await this.call<FsSearchResponse>(`/sounds/${asset.soundId}/similar/`, {
+      const data = await this.call<FsSearchResponse>(`/sounds/${asset.soundId}/similar`, {
         fields: SEARCH_FIELDS,
         page: String(page),
         page_size: '20',
@@ -312,9 +351,12 @@ export class FreesoundProvider implements SoundLibraryProvider {
   async audioFeatures(asset: LibraryAsset): Promise<Record<string, number | string | number[]>> {
     if (!asset.soundId) return {};
     try {
-      const data = await this.call<Record<string, number | string | number[]>>(`/sounds/${asset.soundId}/analysis/`, {
-        fields: 'mfcc,bpm,spectral_centroid,zero_crossing_rate,log_attack_time,temporal_centroid,dynamic_range,warmth,sharpness,roughness',
-      });
+      const data = await this.call<Record<string, number | string | number[]>>(
+        `/sounds/${asset.soundId}/analysis`,
+        {
+          fields: 'mfcc,bpm,spectral_centroid,zero_crossing_rate,log_attack_time,temporal_centroid,dynamic_range,warmth,sharpness,roughness',
+        },
+      );
       return data;
     } catch {
       return {};
@@ -331,8 +373,9 @@ export class FreesoundProvider implements SoundLibraryProvider {
       prep['preview-lq-mp3'] ??
       prep['preview-lq-ogg'];
     if (!url) {
-      // fetch sound instance once to get previews
-      const s = await this.call<FsSound>(`/sounds/${asset.soundId}/`, { fields: 'previews,name,license' });
+      // fetch sound instance once to get previews (via the backend proxy —
+      // the sound endpoint needs the API key)
+      const s = await this.call<FsSound>(`/sounds/${asset.soundId}`, { fields: 'previews,name,license' });
       const pr = s.previews ?? {};
       const u = pr['preview-hq-mp3'] ?? pr['preview-hq-ogg'] ?? pr['preview-lq-mp3'] ?? pr['preview-lq-ogg'];
       if (!u) throw new Error('Freesound returned no preview URL for this sound.');
@@ -342,66 +385,51 @@ export class FreesoundProvider implements SoundLibraryProvider {
   }
 
   async fetchOriginal(asset: LibraryAsset): Promise<PreviewFetch> {
-    const c = this.creds();
-    if (!c.accessToken || c.expiresAt < Date.now()) {
-      throw new Error('Original-quality download requires Freesound OAuth2 (Bearer token). Configure it or use the preview workflow.');
+    // Honest pre-check from the safe runtime status — never a silent
+    // downgrade: an original-quality request fails loudly with an
+    // actionable message instead of returning something else.
+    const rt = this.runtime();
+    const s = rt.status;
+    if (rt.backendOnline && !s.oauthAvailable && !s.refreshable) {
+      throw new Error(
+        'Original-quality download requires Freesound OAuth2 — connect your account in Settings → Sound Libraries. The preview workflow is unaffected.',
+      );
     }
-    const res = await fetch(`${API}/sounds/${asset.soundId}/download/`, {
-      headers: { Authorization: `Bearer ${c.accessToken}` },
-    });
+    // The OAuth2 Bearer token lives in the backend; the browser request
+    // carries nothing but the sound id. The backend refreshes the token
+    // automatically when it has expired.
+    let res: Response;
+    try {
+      res = await fetch(`${API}/sounds/${asset.soundId}/download`);
+    } catch {
+      throw new Error('The Umbra backend is not reachable — original-quality download needs it (it holds the OAuth2 token).');
+    }
     if (!res.ok) {
-      throw new Error(`Freesound original download failed (${res.status}). Preview workflow is unaffected.`);
+      let detail = '';
+      let hint = '';
+      try {
+        const j = (await res.json()) as { error?: string; hint?: string };
+        detail = j.error ?? '';
+        hint = j.hint ?? '';
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new Error(
+        `${detail || `Freesound original download failed (${res.status}).`}${hint ? ` ${hint}` : ''} The preview workflow is unaffected.`,
+      );
     }
     const blob = await res.blob();
     return { blob, mime: blob.type || 'audio/wav', bytes: blob.size };
   }
 
   private async fetchBlob(url: string): Promise<PreviewFetch> {
-    // plain GET — no custom headers, so no CORS preflight (previews return
-    // Access-Control-Allow-Origin: * on GET per Freesound's data servers)
+    // preview files are public (no credential needed) and served with
+    // Access-Control-Allow-Origin: * — plain GET, no custom headers, no
+    // CORS preflight, and no secret ever involved.
     const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
     if (!res.ok) throw new Error(`Freesound preview download failed (${res.status}).`);
     const blob = await res.blob();
     return { blob, mime: blob.type || 'audio/mpeg', bytes: blob.size };
-  }
-
-  /* -------------------------------------------------------- OAuth ---- */
-
-  authorizeUrl(state: string): string {
-    const c = this.creds();
-    const u = new URL(`${API}/oauth2/authorize/`);
-    u.searchParams.set('client_id', c.clientId || '');
-    u.searchParams.set('response_type', 'code');
-    u.searchParams.set('state', state);
-    return u.toString();
-  }
-
-  async exchangeCode(code: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-    const c = this.creds();
-    const body = new URLSearchParams({
-      client_id: c.clientId,
-      client_secret: c.clientSecret,
-      grant_type: 'authorization_code',
-      code,
-    });
-    const res = await fetch(`${API}/oauth2/access_token/`, { method: 'POST', body });
-    if (!res.ok) throw new Error(`Freesound OAuth2 token exchange failed (${res.status}). Check client id / secret.`);
-    const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-    return { accessToken: j.access_token, refreshToken: j.refresh_token, expiresIn: j.expires_in };
-  }
-
-  async refreshAccessToken(): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-    const c = this.creds();
-    const body = new URLSearchParams({
-      client_id: c.clientId,
-      client_secret: c.clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: c.refreshToken,
-    });
-    const res = await fetch(`${API}/oauth2/access_token/`, { method: 'POST', body });
-    if (!res.ok) throw new Error(`Freesound OAuth2 refresh failed (${res.status}). Re-authorize.`);
-    const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-    return { accessToken: j.access_token, refreshToken: j.refresh_token, expiresIn: j.expires_in };
   }
 }
 

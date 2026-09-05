@@ -471,28 +471,17 @@ export const DEFAULT_LIBRARY_SETTINGS: LibrarySettings = {
 
 /* -------------------------------------------------- credentials ------ */
 
-/** Never written to Git. Local-only (localStorage), shown masked in UI. */
-export interface FreesoundCredentials {
-  apiToken: string;
-  clientId: string;
-  clientSecret: string;
-  redirectUri: string;
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;      // epoch ms
-  user: string | null;
-}
-
-export const EMPTY_FREESOUND_CREDS: FreesoundCredentials = {
-  apiToken: '',
-  clientId: '',
-  clientSecret: '',
-  redirectUri: '',
-  accessToken: '',
-  refreshToken: '',
-  expiresAt: 0,
-  user: null,
-};
+/*
+ * Freesound credentials no longer exist as a frontend concept. They are
+ * stored — encrypted at rest — inside the Umbra backend, which attaches
+ * them to every Freesound request it proxies. The browser only sees the
+ * secret-free integration status:
+ *
+ *     src/lib/library/freesoundBackend.ts → FreesoundIntegrationStatus
+ *
+ * Nothing in this module (or any frontend store) may hold an apiKey,
+ * clientSecret, accessToken, or refreshToken.
+ */
 
 export interface SpottingEvent {
   id: string;

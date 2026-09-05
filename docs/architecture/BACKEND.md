@@ -27,7 +27,9 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | `services/device.py` | Real device detection (CUDA/MPS/CPU via actual probes). Returns `None` when unknown — the UI shows nothing rather than a plausible number. | Anything else |
 | `services/generation_jobs.py` | Async job queue with cancellation. `succeeded` is reachable only with decoded audio on disk. | Routing |
 | `services/model_manager.py` | Checkpoint discovery (size on disk), package probing, Models-view report. Only reports what exists. | Downloads (see `scripts/setup_models.py`) |
-| `tests/` | 57 tests: real-audio contract, capability honesty, payload mapping, routing. No model downloads. | — |
+| `services/credentials.py` | **Integration credential vault**: third-party credentials (Freesound today) stored AES-256-GCM encrypted in a local SQLite DB, decrypted only with the server-only `UMBRA_CREDENTIAL_ENCRYPTION_KEY`. Provides secret redaction for logs, a headless env-var fallback (`UMBRA_FREESOUND_*`), and the safe status view the browser is allowed to see. | Any plaintext secret, any browser-facing credential |
+| `services/freesound.py` | The only code that talks to freesound.org with credentials: authenticated search/similar/analysis, OAuth2 authorize/exchange/refresh (CSRF-safe single-use state), original-quality download with auto-refresh, and the real connection test. | Asset mapping / ranking / licensing (those stay in the frontend retrieval subsystem) |
+| `tests/` | 100 tests: real-audio contract, capability honesty, payload mapping, routing, plus 26 backend-managed-Freesound security tests (encrypted-at-rest, no secret fields in status, log redaction, OAuth state single-use, auto-refresh, disconnect). All Freesound HTTP is a deterministic mock; live verification is a separate manual gate. | — |
 
 ## API map (`app.py`)
 
@@ -38,6 +40,8 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | Generation | `POST /api/generate` → `GET /api/jobs[/{id}]` → `POST /api/jobs/{id}/cancel` |
 | Audio | `GET /api/audio[/{id}]`, `DELETE /api/audio/{id}`, `POST /api/audio/upload`, `GET /api/audio/{id}/peaks`, `GET /api/audio/{id}/features` |
 | Search / analysis | `POST /api/search` (CLAP, local files only), `POST /api/analysis/cuts`, `POST /api/analysis/video`, `GET /api/analysis/toolchain` |
+| Integrations | `GET /api/integrations/freesound/status`, `POST|DELETE /api/integrations/freesound/configure`, `POST /api/integrations/freesound/verify`, `POST /api/integrations/freesound/oauth/start|exchange|refresh` — safe fields only, never secrets |
+| Freesound proxy | `GET /api/library/freesound/search`, `GET /api/library/freesound/sounds/{id}`, `…/similar`, `…/analysis`, `…/download` — the authenticated transport for the frontend retrieval pipeline |
 
 ## Rules for changing the backend
 
@@ -50,3 +54,49 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 4. New route? Thin handler in `app.py` delegating to a provider/analysis/
    service module. No inference logic in route functions.
 5. Device/hardware facts come from `services/device.py` probes only.
+6. Third-party credentials never enter `app.py`, logs, or any response body.
+   They live in `services/credentials.py` (encrypted at rest) and are used
+   only through `services/freesound.py`. Status/configure/verify responses
+   are pinned secret-free by `tests` on both sides of the wire.
+
+## Integration credentials — security design
+
+Freesound (and future third-party integrations) are **backend-managed**:
+
+    browser ──► /api/integrations/freesound/* (safe status + one-time POST)
+           ──► /api/library/freesound/*       (credential-free retrieval)
+    backend ──► freesound.org/apiv2           (API key / OAuth2 attached here)
+
+* **Storage**: one row per provider in `.umbra/integrations.db`
+  (`integration_credentials`: `provider`, encrypted `payload`, `created_at`,
+  `updated_at`, `last_verified_at`, `verification_status`,
+  `verification_error`). Schema is versioned via `PRAGMA user_version`
+  migrations in `services/credentials.py`.
+* **Encryption**: AES-256-GCM envelope (`v`, `alg`, `kdf`, `salt`, `nonce`,
+  `ct`). The key comes *only* from `UMBRA_CREDENTIAL_ENCRYPTION_KEY`
+  (base64/hex 32 bytes, or a passphrase stretched with scrypt). The key is
+  never stored in the database — someone with the DB alone cannot decrypt.
+  Without a key the vault refuses to store anything (503, no plaintext
+  fallback). `python -m backend.services.credentials generate-key` prints
+  a fresh key.
+* **Headless alternative**: `UMBRA_FREESOUND_API_KEY` / `…_CLIENT_ID` /
+  `…_CLIENT_SECRET` / `…_REDIRECT_URI` / `…_ACCESS_TOKEN` /
+  `…_REFRESH_TOKEN` / `…_ACCESS_TOKEN_EXPIRES_AT` env vars provide
+  read-only credentials without the database (DB wins per field when both
+  exist).
+* **Transport**: the API key is sent as an `Authorization: Token` header —
+  never a URL query parameter — so it cannot appear in access logs or
+  exception traces. OAuth2 exchanges and refreshes happen exclusively
+  server-side.
+* **OAuth2 CSRF**: state values are `secrets.token_urlsafe(32)`, validated
+  server-side, expire after 10 minutes, and are single-use.
+* **Redaction**: known secret values and credential-shaped parameters are
+  scrubbed from errors at construction time and from all log records via a
+  root-handler `SecretRedactingFilter`.
+* **Origin hardening**: the integration endpoints reject requests whose
+  `Origin` is not the app origin (drive-by/CSRF protection); originless
+  requests (curl, the Vite proxy) pass.
+* **Verification**: `POST …/verify` makes a real authenticated request to
+  freesound.org (a 1-result search with the API key, `/me/` with the OAuth
+  token). `verified` is only ever earned by a real successful response —
+  never by a key merely existing.

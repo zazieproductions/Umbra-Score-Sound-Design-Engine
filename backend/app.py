@@ -24,13 +24,15 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from backend.analysis import embeddings as embeddings_service
 from backend.analysis.events import analyze_video_events
@@ -41,9 +43,26 @@ from backend.analysis.waveform import analyze_features, generate_peaks
 from backend.providers.base import GenerationRequest, ProviderError
 from backend.providers.registry import get_registry, route_intent
 from backend.services import model_manager
+from backend.services import credentials as credentials_service
 from backend.services.audio_store import AudioDecodeError, get_audio_store
 from backend.services.device import runtime_summary
+from backend.services.freesound import (
+    FreesoundClient,
+    FreesoundError,
+    OAuthStateError,
+    OAuthStateStore,
+    get_freesound_client,
+)
 from backend.services.generation_jobs import JobManager
+
+# Best-effort .env loading for the local installation (never overrides real
+# environment variables). python-dotenv is optional at runtime.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 logging.basicConfig(
     level=os.environ.get("UMBRA_LOG_LEVEL", "INFO"),
@@ -53,6 +72,20 @@ log = logging.getLogger("umbra.app")
 
 VERSION = "0.1.0"
 
+#: The exact origin allowlist already used by the CORS middleware. The
+#: integration endpoints additionally *enforce* it for browser requests so a
+#: drive-by page can never POST credentials or consume OAuth state. Requests
+#: without an Origin header (curl, the Vite server proxy) pass.
+_TRUSTED_ORIGIN = re.compile(
+    r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.e2b\.app$"
+)
+
+
+def require_trusted_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if origin and not _TRUSTED_ORIGIN.match(origin):
+        raise HTTPException(status_code=403, detail="request origin is not allowed here")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -61,16 +94,37 @@ async def lifespan(app: FastAPI):
     jobs = JobManager(registry, workers=int(os.environ.get("UMBRA_WORKERS", "1")))
     await jobs.start()
 
+    # Freesound integration: encrypted credential vault + server-side client.
+    cred_store = credentials_service.get_credential_store()
+    freesound = get_freesound_client()
+
     app.state.registry = registry
     app.state.store = store
     app.state.jobs = jobs
+    app.state.credentials = cred_store
+    app.state.freesound = freesound
+    app.state.oauth_states = OAuthStateStore()
+
+    # Scrub known secret values from every log record that reaches a root
+    # handler (defense in depth — error paths redact at construction too).
+    redaction = credentials_service.SecretRedactingFilter(cred_store)
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, credentials_service.SecretRedactingFilter) for f in handler.filters):
+            handler.addFilter(redaction)
 
     ready = [s.id for s in registry.statuses() if s.ready]
     log.info("UMBRA backend %s ready — providers online: %s", VERSION, ", ".join(ready) or "none")
     log.info("audio store: %s", store.root)
+    log.info(
+        "credential vault: %s (encryption key %s)",
+        cred_store.db_path,
+        "configured" if cred_store.encryption_key_configured else "NOT configured — set "
+        "UMBRA_CREDENTIAL_ENCRYPTION_KEY to store integration credentials",
+    )
     try:
         yield
     finally:
+        await freesound.aclose()
         await jobs.stop()
 
 
@@ -397,3 +451,244 @@ async def audio_features(audio_id: str) -> Dict[str, Any]:
     if path is None:
         raise HTTPException(status_code=404, detail=f"unknown audio id '{audio_id}'")
     return analyze_features(path).to_json()
+
+
+# ------------------------------------------------- integrations: freesound
+#
+# Credentials are backend-managed. The browser may only learn whether the
+# integration is configured and usable — status responses never contain
+# apiKey / clientSecret / accessToken / refreshToken / the encryption key.
+
+
+def _fs() -> FreesoundClient:
+    return app.state.freesound
+
+
+def _vault():
+    return app.state.credentials
+
+
+def _freesound_http_error(exc: FreesoundError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"error": str(exc), "hint": exc.hint},
+    )
+
+
+@app.get("/api/integrations/freesound/status", dependencies=[Depends(require_trusted_origin)])
+async def freesound_integration_status() -> Dict[str, Any]:
+    """Safe status ladder — configured / usable / verified, never secrets."""
+    return _vault().freesound_status()
+
+
+@app.post("/api/integrations/freesound/configure", dependencies=[Depends(require_trusted_origin)])
+async def freesound_integration_configure(
+    payload: Dict[str, Any] = Body(...),
+) -> Dict[str, Any]:
+    """Store Freesound credentials server-side (encrypted at rest).
+
+    Accepts any subset of {apiKey, clientId, clientSecret, redirectUri}.
+    Provided-but-empty values clear a field. The secret travels exactly
+    once, in this POST body over the local connection, and is never
+    returned or redisplayed.
+    """
+    patch: Dict[str, str] = {}
+    for field in ("apiKey", "clientId", "clientSecret", "redirectUri"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"'{field}' must be a string")
+        patch[field] = value.strip()
+    if not patch:
+        raise HTTPException(
+            status_code=400,
+            detail="nothing to configure — provide apiKey, clientId, clientSecret and/or redirectUri",
+        )
+    if not any(patch.values()) and not _vault().has_record("freesound"):
+        raise HTTPException(status_code=400, detail="no credentials provided")
+    try:
+        _vault().save("freesound", patch)
+    except credentials_service.CredentialsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    log.info(
+        "freesound integration: credentials updated (fields: %s)",
+        ", ".join(sorted(k for k, v in patch.items() if v)) or "cleared",
+    )
+    return {"saved": True, "status": _vault().freesound_status()}
+
+
+@app.delete("/api/integrations/freesound/configure", dependencies=[Depends(require_trusted_origin)])
+async def freesound_integration_disconnect() -> Dict[str, Any]:
+    """Disconnect: delete every stored Freesound secret from the backend."""
+    deleted = _vault().delete("freesound")
+    log.info("freesound integration: disconnected (stored credentials deleted: %s)", deleted)
+    return {"deleted": deleted, "status": _vault().freesound_status()}
+
+
+@app.post("/api/integrations/freesound/verify", dependencies=[Depends(require_trusted_origin)])
+async def freesound_integration_verify() -> Dict[str, Any]:
+    """Test Connection: a real authenticated request to freesound.org.
+
+    Verified means Freesound returned a successful response — never merely
+    that a key exists. The outcome (and honest error) is recorded.
+    """
+    try:
+        report = await _fs().verify()
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+    if _vault().has_record("freesound"):
+        _vault().record_verification("freesound", report["verified"], report.get("error"))
+    if report["verified"]:
+        log.info("freesound integration: connection verified (%s)", "; ".join(report["checks"]))
+    else:
+        log.warning("freesound integration: verification FAILED — %s", report.get("error"))
+    return {
+        "verification": {**report, "checkedAt": int(time.time() * 1000)},
+        "status": _vault().freesound_status(),
+    }
+
+
+@app.post("/api/integrations/freesound/oauth/start", dependencies=[Depends(require_trusted_origin)])
+async def freesound_oauth_start(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Begin the OAuth2 authorization-code flow.
+
+    The backend issues a cryptographically random, single-use, expiring
+    state and returns the (secret-free) authorization URL for the browser to
+    open. The secret-bearing exchange happens server-side in /oauth/exchange.
+    """
+    try:
+        state, ttl = app.state.oauth_states.issue()
+        redirect_uri = (payload.get("redirectUri") or "").strip() or None
+        url = _fs().authorize_url(state, redirect_uri)
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+    return {"authorizeUrl": url, "expiresInSeconds": ttl}
+
+
+@app.post("/api/integrations/freesound/oauth/exchange", dependencies=[Depends(require_trusted_origin)])
+async def freesound_oauth_exchange(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Exchange the authorization code for tokens (server-side only).
+
+    The state is validated against the one issued by /oauth/start: it must
+    exist, be unexpired, and is consumed on first use (CSRF-safe).
+    """
+    code = str(payload.get("code") or "").strip()
+    state = str(payload.get("state") or "")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="both 'code' and 'state' are required")
+    try:
+        app.state.oauth_states.consume(state)
+    except OAuthStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        await _fs().exchange_code(code)
+    except credentials_service.CredentialsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+    return {"status": _vault().freesound_status()}
+
+
+@app.post("/api/integrations/freesound/oauth/refresh", dependencies=[Depends(require_trusted_origin)])
+async def freesound_oauth_refresh() -> Dict[str, Any]:
+    """Refresh the stored OAuth2 access token now."""
+    try:
+        await _fs().refresh_access_token()
+    except credentials_service.CredentialsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+    return {"status": _vault().freesound_status()}
+
+
+# ---------------------------------------------------- library: freesound
+#
+# The retrieval pipeline (planner → provider search → license gate →
+# ranking → CLAP rerank → cache → AudioClip) stays in the frontend; these
+# endpoints are the authenticated Freesound transport it calls. The browser
+# request carries no Freesound credential — the backend attaches the stored
+# one when talking to freesound.org.
+
+_SEARCH_PARAM_ALLOWLIST = ("query", "page", "page_size", "filter", "sort", "fields", "group_by_pack")
+_SIMILAR_PARAM_ALLOWLIST = ("page", "page_size", "similarity_space", "fields")
+_ANALYSIS_PARAM_ALLOWLIST = ("fields",)
+
+
+def _forwarded(query_params, allowlist: tuple) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in allowlist:
+        if key in query_params:
+            out[key] = query_params[key]
+    for key in ("page", "page_size"):
+        if key in out:
+            try:
+                out[key] = int(out[key])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"'{key}' must be an integer")
+    return out
+
+
+@app.get("/api/library/freesound/search", dependencies=[Depends(require_trusted_origin)])
+async def library_freesound_search(request: Request) -> Dict[str, Any]:
+    params = _forwarded(request.query_params, _SEARCH_PARAM_ALLOWLIST)
+    if not params.get("query"):
+        raise HTTPException(status_code=400, detail="'query' is required")
+    try:
+        return await _fs().search(
+            params["query"],
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 30),
+            filter_=params.get("filter"),
+            sort=params.get("sort"),
+            fields=params.get("fields"),
+        )
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+
+
+@app.get("/api/library/freesound/sounds/{sound_id}", dependencies=[Depends(require_trusted_origin)])
+async def library_freesound_sound(sound_id: int, request: Request) -> Dict[str, Any]:
+    fields = request.query_params.get("fields")
+    try:
+        return await _fs().sound(sound_id, fields)
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+
+
+@app.get("/api/library/freesound/sounds/{sound_id}/similar", dependencies=[Depends(require_trusted_origin)])
+async def library_freesound_similar(sound_id: int, request: Request) -> Dict[str, Any]:
+    params = _forwarded(request.query_params, _SIMILAR_PARAM_ALLOWLIST)
+    try:
+        return await _fs().similar(
+            sound_id,
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 20),
+            similarity_space=params.get("similarity_space", "laion_clap"),
+            fields=params.get("fields"),
+        )
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+
+
+@app.get("/api/library/freesound/sounds/{sound_id}/analysis", dependencies=[Depends(require_trusted_origin)])
+async def library_freesound_analysis(sound_id: int, request: Request) -> Dict[str, Any]:
+    fields = request.query_params.get("fields")
+    try:
+        return await _fs().analysis(sound_id, fields)
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+
+
+@app.get("/api/library/freesound/sounds/{sound_id}/download", dependencies=[Depends(require_trusted_origin)])
+async def library_freesound_download(sound_id: int):
+    """Original-quality file. OAuth2 Bearer is attached by the backend (with
+    automatic refresh); the browser sends nothing but the sound id."""
+    try:
+        resp = await _fs().download(sound_id)
+    except FreesoundError as exc:
+        return _freesound_http_error(exc)
+    media_type = resp.headers.get("content-type", "application/octet-stream")
+    return Response(content=resp.content, media_type=media_type)

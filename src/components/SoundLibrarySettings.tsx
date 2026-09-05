@@ -1,9 +1,24 @@
 import { useMemo, useState } from 'react';
-import { ExternalLink, KeyRound, Lock, RefreshCw, Server, Shield, Unlock } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
+  KeyRound,
+  Loader2,
+  PlugZap,
+  RefreshCw,
+  Server,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import { Panel } from './Views';
 import type { LicenseClass, LicenseMode } from '../lib/library/types';
 import { LICENSE_CLASS_LABELS } from '../lib/library/types';
+import { freesoundLadder } from '../lib/library/freesoundBackend';
+import type { FreesoundLadderLabel } from '../lib/library/freesoundBackend';
 
 /* ------------------------------------------------------ licensing ---- */
 
@@ -66,174 +81,247 @@ export function LicenseSettings({ studio }: { studio: Studio }) {
 
 /* ------------------------------------------------------ freesound ---- */
 
+const LADDER_TONE: Record<FreesoundLadderLabel, string> = {
+  'BACKEND OFFLINE': 'border-tan/40 text-tan',
+  'NOT CONFIGURED': 'border-tan/40 text-tan',
+  CONFIGURED: 'border-ember/40 text-ember',
+  'SEARCH READY': 'border-brine/40 text-brine',
+  'OAUTH READY': 'border-brine/40 text-brine',
+  'TOKEN EXPIRED': 'border-ember/40 text-ember',
+  ERROR: 'border-red-400/40 text-red-300',
+};
+
+const LADDER_ICON: Record<FreesoundLadderLabel, typeof Shield> = {
+  'BACKEND OFFLINE': Server,
+  'NOT CONFIGURED': Server,
+  CONFIGURED: Shield,
+  'SEARCH READY': ShieldCheck,
+  'OAUTH READY': ShieldCheck,
+  'TOKEN EXPIRED': ShieldAlert,
+  ERROR: AlertTriangle,
+};
+
 export function FreesoundSettings({ studio }: { studio: Studio }) {
-  const c = studio.creds;
-  const [showToken, setShowToken] = useState(false);
-  const [token, setToken] = useState(c.apiToken);
-  const [clientId, setClientId] = useState(c.clientId);
-  const [clientSecret, setClientSecret] = useState(c.clientSecret);
-  const [code, setCode] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const tokenOk = c.apiToken.trim().length > 0;
-  const oauthOk = c.accessToken.trim().length > 0 && c.expiresAt > nowTick;
-  const u = c.redirectUri || (typeof location !== 'undefined' ? location.origin : 'http://localhost:5173');
-  const oauthHrs = useMemo(() => Math.max(0, Math.round((c.expiresAt - nowTick) / 3600000)), [c.expiresAt, nowTick]);
+  const st = studio.freesoundStatus;
+  const online = studio.freesoundOnline;
+  const ladder = useMemo(() => freesoundLadder({ status: st, backendOnline: online }), [st, online]);
+  const LadderIcon = LADDER_ICON[ladder.label];
 
-  const saveToken = () => {
-    studio.saveCreds({ apiToken: token.trim() });
-    setNowTick(Date.now());
-    setMsg(token.trim() ? 'API token saved locally. Search + preview workflow unlocked.' : 'Token cleared. Preview workflow disabled.');
+  const [apiKey, setApiKey] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectUri, setRedirectUri] = useState(st.redirectUri ?? defaultOrigin());
+  const [editing, setEditing] = useState(!st.configured);
+  const [busy, setBusy] = useState<null | 'configure' | 'verify' | 'disconnect' | 'refresh'>(null);
+  const [msg, setMsg] = useState<{ text: string; level: 'ok' | 'warn' } | null>(null);
+
+  /** Clear every secret-bearing input — called the moment a submit resolves. */
+  const clearSecretInputs = () => {
+    setApiKey('');
+    setClientSecret('');
+    setClientId('');
   };
 
-  const saveOAuth = () => {
-    studio.saveCreds({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), redirectUri: u });
-    setMsg('OAuth2 application credentials saved locally.');
-  };
-
-  const authorize = () => {
-    const state = Math.random().toString(36).slice(2);
-    let url = `https://freesound.org/apiv2/oauth2/authorize/?client_id=${encodeURIComponent(clientId)}&response_type=code&state=${state}`;
-    // Freesound needs a registered redirect_uri; if user gave none, use the
-    // API-app redirect URL as printed on freesound.org/apiv2/apply
-    url += `&redirect_uri=${encodeURIComponent(u)}`;
-    window.open(url, '_blank', 'noopener');
-  };
-
-  const exchange = async () => {
-    setBusy(true);
+  const submit = async () => {
+    const payload = {
+      apiKey: apiKey.trim(),
+      clientId: clientId.trim(),
+      clientSecret: clientSecret.trim(),
+      redirectUri: redirectUri.trim(),
+    };
+    const filled = Object.fromEntries(Object.entries(payload).filter(([, v]) => v !== ''));
+    if (Object.keys(filled).length === 0) {
+      setMsg({ text: 'Nothing entered — paste at least the API key.', level: 'warn' });
+      return;
+    }
+    setBusy('configure');
     setMsg(null);
     try {
-      const body = new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'authorization_code',
-        code,
-      });
-      const res = await fetch('https://freesound.org/apiv2/oauth2/access_token/', { method: 'POST', body });
-      if (!res.ok) throw new Error(`exchange failed ${res.status}`);
-      const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-      studio.saveCreds({ accessToken: j.access_token, refreshToken: j.refresh_token, expiresAt: Date.now() + j.expires_in * 1000 });
-      setNowTick(Date.now());
-      setCode('');
-      setMsg('Access token exchanged. Original-quality downloads enabled for 24h.');
-      logAuth(studio, `freesound oauth2: access token acquired (${j.expires_in}s)`, 'ok');
+      await studio.configureFreesound(filled);
+      // SECURITY: the secret existed in browser memory only between typing
+      // and the one-time POST — clear it immediately, never redisplay it.
+      clearSecretInputs();
+      setEditing(false);
+      setMsg({ text: 'Stored on the backend, encrypted at rest. Testing the connection…', level: 'ok' });
+      // honest follow-up: configured ≠ working — verify for real
+      try {
+        const r = await studio.testFreesoundConnection();
+        setMsg(
+          r.verification.verified
+            ? { text: `Verified — ${r.verification.checks.join('; ')}`, level: 'ok' }
+            : { text: `Stored, but verification failed — ${r.verification.error ?? 'unknown error'}`, level: 'warn' },
+        );
+      } catch (e) {
+        setMsg({ text: `Stored, but the connection test failed — ${(e as Error).message}`, level: 'warn' });
+      }
     } catch (e) {
-      setMsg((e as Error).message);
-      logAuth(studio, `freesound oauth2: ${(e as Error).message}`, 'warn');
+      clearSecretInputs();
+      setMsg({ text: (e as Error).message, level: 'warn' });
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy('disconnect');
+    setMsg(null);
+    try {
+      await studio.disconnectFreesound();
+      setEditing(true);
+      setMsg({ text: 'Disconnected — every stored Freesound secret was deleted from the backend.', level: 'ok' });
+    } catch (e) {
+      setMsg({ text: (e as Error).message, level: 'warn' });
+    } finally {
+      setBusy(null);
     }
   };
 
   const refresh = async () => {
-    if (!c.refreshToken) return;
-    setBusy(true);
+    setBusy('refresh');
+    setMsg(null);
     try {
-      const body = new URLSearchParams({
-        client_id: c.clientId,
-        client_secret: c.clientSecret,
-        grant_type: 'refresh_token',
-        refresh_token: c.refreshToken,
-      });
-      const res = await fetch('https://freesound.org/apiv2/oauth2/access_token/', { method: 'POST', body });
-      if (!res.ok) throw new Error(`refresh failed ${res.status}`);
-      const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-      studio.saveCreds({ accessToken: j.access_token, refreshToken: j.refresh_token, expiresAt: Date.now() + j.expires_in * 1000 });
-      setNowTick(Date.now());
-      setMsg('Access token refreshed.');
+      await studio.refreshFreesoundToken();
+      setMsg({ text: 'Access token refreshed — original-quality downloads re-enabled.', level: 'ok' });
     } catch (e) {
-      setMsg((e as Error).message);
+      setMsg({ text: (e as Error).message, level: 'warn' });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
+
+  // snapshot of "now" at panel mount — recomputed when the panel remounts,
+  // keeping render pure (no Date.now() during render)
+  const [nowTick] = useState(() => Date.now());
+  const oauthHoursLeft = st.expiresAt ? Math.max(0, Math.round((st.expiresAt - nowTick) / 3600000)) : null;
 
   return (
     <Panel
       title="Sound Libraries → Freesound"
-      sub="official APIv2 · token for search/preview · OAuth2 only for original quality"
+      sub="backend-managed integration · credentials live encrypted in the Umbra backend, never in this browser"
       right={
-        <span className={`chip ${tokenOk ? 'border-brine/40 text-brine' : 'border-tan/40 text-tan'}`}>
-          {tokenOk ? 'token ready' : 'no token'}
+        <span className={`chip ${LADDER_TONE[ladder.label]}`}>
+          <LadderIcon size={9} /> {ladder.label}
         </span>
       }
     >
       <div className="flex flex-col gap-3">
         <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-          <div className="mb-1.5 flex items-center gap-2">
-            <KeyRound size={12} className="text-orchid" />
-            <span className="text-[11px] font-medium text-bone">Level 1 · API token</span>
-            <span className="ml-auto flex gap-1">
-              <button className="btn px-1.5 py-1 text-[9px]" onClick={() => setShowToken((s) => !s)} title={showToken ? 'Hide' : 'Show'}>
-                {showToken ? <Unlock size={10} /> : <Lock size={10} />}
-              </button>
-              <button className="btn px-1.5 py-1 text-[9px]" onClick={saveToken}>
-                Save
-              </button>
+          <p className="text-[9.5px] leading-relaxed text-dim">{ladder.detail}</p>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[8.5px] text-dim">
+            <span className="chip">
+              <Server size={8} /> {online ? 'backend up' : 'backend down'}
             </span>
+            <span className="chip">{st.storage === 'encrypted-db' ? 'AES-256-GCM vault' : st.storage === 'env' ? 'server env vars' : 'no storage'}</span>
+            {st.lastVerifiedAt && (
+              <span className="chip">
+                <CheckCircle2 size={8} /> verified {new Date(st.lastVerifiedAt).toLocaleString()}
+              </span>
+            )}
+            {st.user && <span className="chip">@{st.user}</span>}
+            {oauthHoursLeft !== null && st.oauthAvailable && <span className="chip">bearer ~{oauthHoursLeft}h</span>}
           </div>
-          <p className="mb-1.5 text-[9.5px] leading-relaxed text-dim">
-            Enables search, metadata and preview retrieval. Stored in your browser's local storage only — never in Git, never uploaded.
-          </p>
-          <input
-            type={showToken ? 'text' : 'password'}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="your Freesound API token (Client secret/Api key)"
-            className="w-full rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[11px] text-bone outline-none focus:border-ember/40"
-            autoComplete="off"
-          />
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {st.configured && !editing && (
+              <button className="btn px-2 py-1 text-[10px]" onClick={() => void studio.testFreesoundConnection()} disabled={busy !== null}>
+                {busy === 'verify' ? <Loader2 size={10} className="animate-spin" /> : <PlugZap size={10} />} Test Connection
+              </button>
+            )}
+            {st.configured && st.oauthConfigured && (
+              <button className="btn px-2 py-1 text-[10px]" onClick={() => void studio.reconnectFreesound()} disabled={busy !== null}>
+                <ExternalLink size={10} /> Reconnect
+              </button>
+            )}
+            {st.tokenExpired && st.refreshable && (
+              <button className="btn px-2 py-1 text-[10px]" onClick={() => void refresh()} disabled={busy !== null}>
+                {busy === 'refresh' ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />} Refresh token
+              </button>
+            )}
+            {st.configured && !editing && (
+              <button className="btn px-2 py-1 text-[10px]" onClick={() => setEditing(true)} disabled={busy !== null}>
+                <KeyRound size={10} /> Edit credentials
+              </button>
+            )}
+            {st.configured && (
+              <button
+                className="btn ml-auto px-2 py-1 text-[10px] text-red-300/90"
+                onClick={() => void disconnect()}
+                disabled={busy !== null}
+                title="Delete every stored Freesound secret from the backend"
+              >
+                {busy === 'disconnect' ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />} Disconnect
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-          <div className="mb-1.5 flex items-center gap-2">
-            <Server size={12} className="text-ember" />
-            <span className="text-[11px] font-medium text-bone">Level 2 · OAuth2 (original quality)</span>
-            <span className={`chip ml-auto ${oauthOk ? 'border-brine/40 text-brine' : 'border-white/10 text-dim'}`}>
-              {oauthOk ? `bearer ${oauthHrs}h` : 'not connected'}
-            </span>
+        {online && editing && (
+          <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+            <div className="mb-1.5 flex items-center gap-2">
+              <KeyRound size={12} className="text-orchid" />
+              <span className="text-[11px] font-medium text-bone">Configure (one-time POST to the backend)</span>
+            </div>
+            <p className="mb-1.5 text-[9.5px] leading-relaxed text-dim">
+              Values are sent once over the local backend connection, then exist only server-side — encrypted at
+              rest with a key that never leaves the server environment. Inputs clear on save and are never
+              redisplayed. Find the key at <span className="text-ash">freesound.org/apiv2/apply</span> (API key / client secret).
+            </p>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={st.searchAvailable ? 'API key — stored (leave blank to keep)' : 'API key / client secret (required for search)'}
+                className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40 sm:col-span-2"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="client id (for OAuth2 original quality)"
+                className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="client secret (leave blank to keep)"
+                className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <input
+                value={redirectUri}
+                onChange={(e) => setRedirectUri(e.target.value)}
+                placeholder="redirect url (must match your Freesound app)"
+                className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40 sm:col-span-2"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <button className="btn px-2.5 py-1 text-[10px]" onClick={() => void submit()} disabled={busy !== null}>
+                {busy === 'configure' ? <Loader2 size={10} className="animate-spin" /> : <Shield size={10} />} Save to backend
+              </button>
+              {st.configured && (
+                <button className="btn px-2 py-1 text-[10px]" onClick={() => { setEditing(false); clearSecretInputs(); }} disabled={busy !== null}>
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
-          <p className="mb-1.5 text-[9.5px] leading-relaxed text-dim">
-            Only for original-quality downloads — the API requires OAuth2 for <span className="text-ash">/sound/&lt;id&gt;/download/</span>.
-            The preview workflow stays fully useful without it. Credentials: your Freesound API app's client id/secret (created at
-            freesound.org/apiv2/apply), redirect URI must match.
-          </p>
-          <div className="grid gap-1.5 sm:grid-cols-2">
-            <input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="client id" className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40" autoComplete="off" />
-            <input value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="client secret (local only)" type="password" className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40" autoComplete="off" />
-            <input value={u} onChange={(e) => studio.saveCreds({ redirectUri: e.target.value })} placeholder="redirect url" className="rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 text-[10.5px] text-bone outline-none focus:border-ember/40 sm:col-span-2" autoComplete="off" />
-          </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <button className="btn px-2 py-1 text-[10px]" onClick={authorize} disabled={!clientId}>
-              <ExternalLink size={10} /> Authorize on Freesound
-            </button>
-            <input
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              placeholder="paste authorization code"
-              className="min-w-[150px] flex-1 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 text-[10.5px] text-bone outline-none focus:border-ember/40"
-              autoComplete="off"
-            />
-            <button className="btn px-2 py-1 text-[10px]" onClick={() => void exchange()} disabled={busy || !code}>
-              {busy ? <RefreshCw size={10} className="animate-spin" /> : <KeyRound size={10} />} Exchange
-            </button>
-            <button className="btn px-2 py-1 text-[10px]" onClick={() => void refresh()} disabled={busy || !c.refreshToken} title="Use stored refresh token">
-              <RefreshCw size={10} /> Refresh
-            </button>
-            <button className="btn px-2 py-1 text-[10px]" onClick={saveOAuth}>
-              Save
-            </button>
-          </div>
-          {msg && <p className="mt-1.5 text-[9.5px] text-dim">{msg}</p>}
-        </div>
+        )}
+
+        {msg && <p className={`text-[9.5px] leading-relaxed ${msg.level === 'ok' ? 'text-brine' : 'text-ember'}`}>{msg.text}</p>}
 
         <div className="flex items-start gap-2 rounded-lg border border-brine/20 bg-brine/[0.05] p-2">
           <Shield size={12} className="mt-px shrink-0 text-brine" />
           <p className="text-[9.5px] leading-relaxed text-dim">
             Preview ≠ original. The candidate browser plainly labels every asset PREVIEW until an OAuth2 original is fetched; the
-            ledger records the actual quality.
+            ledger records the actual quality. Search and preview need only the API key; original-quality downloads use OAuth2
+            and refresh automatically.
           </p>
         </div>
       </div>
@@ -241,6 +329,10 @@ export function FreesoundSettings({ studio }: { studio: Studio }) {
   );
 }
 
-function logAuth(studio: Studio, text: string, level: 'info' | 'ok' | 'warn' = 'info') {
-  studio.log(text, level);
+function defaultOrigin(): string {
+  try {
+    return typeof location !== 'undefined' ? location.origin : 'http://localhost:5173';
+  } catch {
+    return 'http://localhost:5173';
+  }
 }
