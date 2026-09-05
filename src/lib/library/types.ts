@@ -153,6 +153,84 @@ export interface ProviderStatus {
 export type AssetQuality = 'preview' | 'original';
 export type ClipSource = 'LIB' | 'USR' | 'GEN' | 'VID' | 'PROC' | 'PIX';
 
+/* ----------------------------------------------------- video events -- */
+
+/**
+ * Sound-producing event kinds inferred from video analysis.
+ * `other` is the honest catch-all — never pretend we know more than the
+ * pixels + scene metadata tell us.
+ */
+export type SoundEventKind =
+  | 'footstep'
+  | 'door'
+  | 'impact'
+  | 'cloth'
+  | 'mechanical'
+  | 'water'
+  | 'wind'
+  | 'vehicle'
+  | 'ambience'
+  | 'room-tone'
+  | 'body'
+  | 'breath'
+  | 'object-movement'
+  | 'other';
+
+export type SoundDistance = 'close' | 'medium' | 'far';
+
+/**
+ * The clean intermediate representation between video analysis and sound
+ * retrieval. Every field that is estimated from pixels vs. scene metadata is
+ * explained in `evidence`; confidence is never fabricated.
+ */
+export interface SoundEventCandidate {
+  id: string;
+  sceneId: string;
+  /** observed onset in project seconds (what the video shows) */
+  timestamp: number;
+  /** where the sound should begin; may differ from detected at report time */
+  placementTimestamp?: number;
+  /** observed duration when the analyzer can bound it (motion span) */
+  duration?: number;
+  event: SoundEventKind;
+  material?: string;
+  action?: string;
+  environment?: string;
+  distance?: SoundDistance;
+  perspective?: string;
+  /** 0..1 — pixel evidence × semantic match. 0.8+ only for strong patterns. */
+  confidence: number;
+  evidence: string[];
+  suggestedRole: SoundRole;
+  /** the GOOD query — audible phenomenon, not cinematic prose */
+  query: string;
+  altQueries: string[];
+  /** true when this was derived from a user spotting event (authoritative) */
+  fromSpotting?: boolean;
+  /**
+   * true when pixels give a signal but the scene does not NAME the source
+   * (e.g. gait rhythm in an unnamed interior). Such events stay SUGGEST-only
+   * even when the pixel confidence is high.
+   */
+  ambiguous?: boolean;
+}
+
+/** Result of running pixel-level vision analysis over a real video. */
+export interface SoundEventAnalysis {
+  available: boolean;
+  /** analysis method actually run: 'browser-pixel' | 'backend-ffmpeg' | 'none' */
+  method: 'browser-pixel' | 'backend-ffmpeg' | 'none';
+  frameCount: number;
+  fps: number;
+  duration: number;
+  /** true when a bounded frame budget truncated the video */
+  partial: boolean;
+  events: SoundEventCandidate[];
+  /** honest failure / capability note */
+  message: string | null;
+  analyzedAt: number;
+}
+
 /** A retrieved/imported sound, with all provenance attached. */
 export interface LibraryAsset {
   provider: ProviderId;
@@ -212,6 +290,31 @@ export interface RetrievalIntent {
   transform?: TransformSpec;
   addProceduralSub?: boolean;
   isSilenceChoice?: boolean;
+  /* ---- autonomous video-analysis provenance (readable + explainable) ---- */
+  /** observed onset from analysis (project seconds) */
+  detectedTimestamp?: number;
+  /** where the clip should actually begin (may differ from detected) */
+  placementTimestamp?: number;
+  /** configurable tolerance for transients, ms */
+  timingToleranceMs?: number;
+  eventKind?: SoundEventKind;
+  eventConfidence?: number;
+  eventEvidence?: string[];
+  material?: string;
+  action?: string;
+  environment?: string;
+  distance?: SoundDistance;
+  perspective?: string;
+  /** where this intent came from */
+  origin?: 'video-analysis' | 'spotting' | 'scene-text' | 'manual' | 'alternative';
+  /**
+   * For repeated roles (footsteps): the detected onsets that share ONE
+   * search + one small variant family. The service searches once and
+   * places `familySteps.length` clips at these timestamps.
+   */
+  familySteps?: number[];
+  /** events below the AUTH configurable confidence are suggestions only */
+  suggestOnly?: boolean;
 }
 
 /** Nondestructive source + transform. The original asset is always kept. */
@@ -261,6 +364,24 @@ export interface RankedCandidate {
   signals: { label: string; value: string; weight: number }[];
   licenseOk: boolean;
   licenseReason: string | null;
+  /** honest quality warnings (e.g. excessive duration/silence/weak match) */
+  flags?: string[];
+}
+
+/** Why one intent was placed / suggested / skipped during an auto run. */
+export type AutoPlacementStatus = 'placed' | 'suggested' | 'skipped' | 'silence' | 'failed';
+
+export interface AutoPlacementReport {
+  intentId: string;
+  role: SoundRole;
+  eventTimestamp?: number;
+  placementTimestamp?: number;
+  query: string;
+  status: AutoPlacementStatus;
+  reason: string;
+  match?: number;
+  asset?: LibraryAsset;
+  familySize?: number;
 }
 
 export interface RetrievalSearchResult {
@@ -324,15 +445,28 @@ export interface LibrarySettings {
   autoSafeThreshold: number;
   autoFullThreshold: number;
   usePreviewFirst: boolean;
+  /* ---- autonomous pipeline controls ---- */
+  /** ±ms tolerance used for transient placement (approx. 80–150 ms) */
+  timingToleranceMs: number;
+  /** min event confidence for AUTO SAFE placement (0..1) */
+  eventConfidenceThreshold: number;
+  /** min candidate match for AUTO SAFE placement (0..1) */
+  candidateMatchThreshold: number;
+  /** hard bound on Freesound searches per auto run (family = 1 search) */
+  maxSearchesPerRun: number;
 }
 
 export const DEFAULT_LIBRARY_SETTINGS: LibrarySettings = {
   licensePolicy: { mode: 'personal', accepted: ['CC0', 'CC_BY', 'CC_BY_NC'] },
   density: 'normal',
   autoMode: 'suggest',
-  autoSafeThreshold: 0.82,
+  autoSafeThreshold: 0.75,
   autoFullThreshold: 0.6,
   usePreviewFirst: true,
+  timingToleranceMs: 120,
+  eventConfidenceThreshold: 0.8,
+  candidateMatchThreshold: 0.75,
+  maxSearchesPerRun: 10,
 };
 
 /* -------------------------------------------------- credentials ------ */

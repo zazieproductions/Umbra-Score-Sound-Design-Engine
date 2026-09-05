@@ -26,10 +26,11 @@ import { clipEnd, moveClip, splitClip, trimClip } from './clips';
 import { useGeneration } from './useGeneration';
 import type { GenerateRequest } from './providers';
 // Library imports — preserve PR7 retrieval completely
-import { RetrievalService } from './library/service';
+import { RetrievalService, type AutoPlacementDetail } from './library/service';
 import { soundCache, provenanceStore, credsStore, settingsStore, shortId } from './library/cache';
 import { exportCreditsJson, exportCreditsTxt, downloadText } from './library/credits';
-import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundCredentials, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset } from './library/types';
+import { analyzeVideoUrl, condenseEvents, type EventEnvironment } from './library/videoAnalysis';
+import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundCredentials, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
 import { EMPTY_FREESOUND_CREDS, DEFAULT_LIBRARY_SETTINGS } from './library/types';
 import { tc } from './format';
 
@@ -54,6 +55,9 @@ export function useStudio() {
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
+  const [analyzingVideo, setAnalyzingVideo] = useState(false);
+  const [videoAnalysisLog, setVideoAnalysisLog] = useState<string | null>(null);
+  const [lastAutoReports, setLastAutoReports] = useState<AutoPlacementReport[]>([]);
   const [regenerating, setRegenerating] = useState<Record<string, number>>({});
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   /** in/out points on the project timeline used to target generation */
@@ -133,6 +137,81 @@ export function useStudio() {
     timers.current.push(window.setTimeout(fn, ms));
   };
 
+  /* -------------------------------------------- contextual vision ---- */
+
+  /**
+   * Drive the real video through the browser pixel analyzer, scene by
+   * scene. Only pixel evidence + that scene's metadata produce events;
+   * the result lands on the Project so AUTO SOUND DESIGN can consume it.
+   */
+  const analyzeProjectVideo = useCallback(
+    async (projectRef: Project) => {
+      if (projectRef.soundAnalysis && projectRef.soundAnalysis.events.length) return;
+      if (!projectRef.videoUrl) {
+        setVideoAnalysisLog('video analysis: no video file on this project (demo load) — using scene text only');
+        return;
+      }
+      setAnalyzingVideo(true);
+      try {
+        const collected: SoundEventCandidate[] = [];
+        let frameCount = 0;
+        let fpsUsed = 0;
+        let partial = false;
+        for (const scene of projectRef.scenes) {
+          const span = Math.max(1, scene.end - scene.start);
+          const maxFrames = Math.max(30, Math.min(220, Math.round(span * 6)));
+          const fps = Math.max(1, Math.min(8, Math.round(maxFrames / span)));
+          const env: EventEnvironment = {
+            sceneId: scene.id,
+            sceneStart: scene.start,
+            sceneEnd: scene.end,
+            title: scene.title,
+            tags: scene.tags,
+            summary: scene.summary,
+          };
+          const r = await analyzeVideoUrl(projectRef.videoUrl, env, {
+            fps,
+            maxFrames,
+            onProgress: (n) => log(`vision: scene ${scene.index} · ${n}/${maxFrames} frames`, 'info'),
+          });
+          if (!r.available) setVideoAnalysisLog(`video analysis: ${r.message}`);
+          frameCount += r.frameCount;
+          fpsUsed = Math.max(fpsUsed, r.fps);
+          if (r.partial) partial = true;
+          collected.push(...r.events);
+        }
+        const events = condenseEvents(collected, 40);
+        const analysis: SoundEventAnalysis = {
+          available: events.length > 0,
+          method: 'browser-pixel',
+          frameCount,
+          fps: fpsUsed,
+          duration: projectRef.duration,
+          partial,
+          events,
+          message: events.length
+            ? `${events.length} event candidate(s) from ${frameCount} frames — moments: ${events.map((e) => e.timestamp.toFixed(1)).join(', ')}`
+            : `No motion-derived sound events across ${frameCount} frames — negative space preserved`,
+          analyzedAt: Date.now(),
+        };
+        setVideoAnalysisLog(`video analysis: ${analysis.message}`);
+        setProject((cur) => (cur && cur.id === projectRef.id ? { ...cur, soundEvents: events, soundAnalysis: analysis } : cur));
+        log(`vision: ${analysis.message}`, events.length ? 'ok' : 'info');
+      } finally {
+        setAnalyzingVideo(false);
+      }
+    },
+    [log],
+  );
+
+  const reanalyzeVideo = useCallback(async () => {
+    if (!project) return;
+    const cleared = { ...project, soundEvents: [] as SoundEventCandidate[], soundAnalysis: undefined as SoundEventAnalysis | undefined };
+    setProject(cleared);
+    setVideoAnalysisLog('video analysis: re-running…');
+    await analyzeProjectVideo(cleared);
+  }, [project, analyzeProjectVideo]);
+
   /* ------------------------------------------------ ingest + analysis */
 
   const ingest = useCallback(
@@ -145,6 +224,8 @@ export function useStudio() {
       setAnalyzing(true);
       setAnalyzeProgress(0);
       log(`ingest: ${name} · ${duration.toFixed(1)}s`, 'ok');
+      // real pixel analysis drives autonomous sound design (never blocks ingest)
+      void analyzeProjectVideo(p);
 
       const total = p.scenes.length;
       p.scenes.forEach((s, i) => {
@@ -173,7 +254,7 @@ export function useStudio() {
         }, 1200 + i * 520);
       });
     },
-    [log],
+    [log, analyzeProjectVideo],
   );
 
   const loadDemo = useCallback(() => {
@@ -375,9 +456,24 @@ export function useStudio() {
 
   /* ------------------------------------------------ library helpers --- */
 
-  // Convert a library SoundClip (from service) into unified AudioClip and create blob URL
-  const libraryClipToUnified = useCallback(async (sc: SoundClip): Promise<AudioClip> => {
+  // Convert a library SoundClip (from service) into unified AudioClip and create blob URL.
+  // `place` carries autonomous-analysis provenance onto the canonical clip.
+  const libraryClipToUnified = useCallback(async (sc: SoundClip, place?: Partial<AutoPlacementDetail>): Promise<AudioClip> => {
     const ac = soundClipToAudioClip(sc);
+    if (place) {
+      ac.eventTimestamp = place.eventTimestamp;
+      ac.placementTimestamp = place.placementTimestamp;
+      ac.eventConfidence = place.eventConfidence;
+      ac.searchQuery = place.searchQuery;
+      ac.eventEvidence = place.eventEvidence;
+      ac.eventKind = place.eventKind;
+      ac.eventMaterial = place.eventMaterial;
+      ac.eventAction = place.eventAction;
+      ac.eventEnvironment = place.eventEnvironment;
+      ac.eventDistance = place.eventDistance;
+      ac.eventPerspective = place.eventPerspective;
+      ac.autoPlaced = place.autoPlaced;
+    }
     try {
       const rec = await soundCache.get(sc.cacheKey);
       if (rec) {
@@ -444,6 +540,20 @@ export function useStudio() {
     return lib.planForScene(ctx);
   }, [project, lib]);
 
+  /** The ACTUAL video-driven plan for a scene (events first). */
+  const planVideoScene = useCallback(
+    (sceneId: string) => {
+      if (!project) return [];
+      const scene = project.scenes.find((s) => s.id === sceneId);
+      if (!scene) return [];
+      const events = (project.soundEvents ?? []).filter((e) => e.sceneId === sceneId || !e.sceneId);
+      if (!events.length) return [];
+      const ctx = { sceneId: scene.id, start: scene.start, end: scene.end, title: scene.title, tags: scene.tags, summary: scene.summary, tension: scene.tension, motion: scene.motion, hits: scene.hits, spotting: project.spotting.filter((e) => e.sceneId === sceneId) };
+      return lib.planFromVideo(ctx, events);
+    },
+    [project, lib],
+  );
+
   const auditionAsset = useCallback(async (asset: LibraryAsset) => {
     const { blob } = await lib.ensurePreview(asset);
     const buf = await decodeForPlayback(blob);
@@ -456,7 +566,20 @@ export function useStudio() {
     const s = start ?? intent.time ?? activeScene.start;
     const sc = await lib.placeClip({ sceneId: activeScene.id, intent, candidate, start: s, projectId: project.id });
     await lib.recordProvenance(sc, project.id);
-    const ac = await libraryClipToUnified(sc);
+    const ac = await libraryClipToUnified(sc, {
+      eventTimestamp: intent.detectedTimestamp ?? intent.time ?? undefined,
+      placementTimestamp: intent.placementTimestamp ?? s,
+      eventConfidence: intent.eventConfidence,
+      searchQuery: intent.query,
+      eventEvidence: intent.eventEvidence,
+      eventKind: intent.eventKind,
+      eventMaterial: intent.material,
+      eventAction: intent.action,
+      eventEnvironment: intent.environment,
+      eventDistance: intent.distance,
+      eventPerspective: intent.perspective,
+      autoPlaced: false,
+    });
     addClip(ac);
     log(`placed: ${ac.name} @ ${tc(ac.start)} · match ${Math.round(ac.match! * 100)}%`, 'ok');
     return ac;
@@ -476,38 +599,73 @@ export function useStudio() {
     const { cacheKey } = await lib.ensurePreview(candidate.asset);
     await soundCache.touchProjects(cacheKey, project.id);
     const ac = await libraryClipToUnified({ ...sc, cacheKey, asset: candidate.asset });
-    // keep position/gain/pan etc from target
-    const merged: AudioClip = { ...target, asset: ac.asset, cacheKey: ac.cacheKey, url: ac.url, name: ac.name, match: ac.match, audioId: ac.audioId, sampleRate: ac.sampleRate, channels: ac.channels, sourceDuration: ac.sourceDuration };
+    // keep position/gain/pan/etc from target; if this replacement came from a
+    // FIND ALTERNATIVE run, the new search query becomes the truthful intent
+    const altQuery = retrieval.intent?.query;
+    const merged: AudioClip = {
+      ...target,
+      asset: ac.asset,
+      cacheKey: ac.cacheKey,
+      url: ac.url,
+      name: ac.name,
+      match: ac.match,
+      audioId: ac.audioId,
+      sampleRate: ac.sampleRate,
+      channels: ac.channels,
+      sourceDuration: ac.sourceDuration,
+      ...(altQuery ? { searchQuery: altQuery } : {}),
+    };
     setProject((cur) => cur ? { ...cur, clips: cur.clips.map((c) => c.id === clipId ? merged : c) } : cur);
     log(`replace: ${target.name} → ${merged.name}`, 'ok');
-  }, [project, lib, libraryClipToUnified, log]);
+  }, [project, retrieval.intent, lib, libraryClipToUnified, log]);
 
   const findAlternatives = useCallback(async (clipId: string) => {
     const clip = project?.clips.find((c) => c.id === clipId);
     if (!clip || !clip.asset) { log('no asset for alternative search', 'warn'); return null; }
     const sc = clip as unknown as SoundClip;
-    const intent = lib.alternativeIntent(sc);
+    const intent = lib.alternativeIntent(sc, 'alt', {
+      query: clip.searchQuery ?? (clip.asset.tags.length ? clip.asset.tags.slice(0, 4).join(' ') : clip.name),
+      detectedTimestamp: clip.eventTimestamp ?? clip.start,
+      placementTimestamp: clip.placementTimestamp ?? clip.start,
+      eventConfidence: clip.eventConfidence,
+      eventKind: clip.eventKind ?? ((clip.role ?? 'MISC_FOLEY').toLowerCase().replace('_', '-') as RetrievalIntent['eventKind']),
+      material: clip.eventMaterial,
+      environment: clip.eventEnvironment,
+      distance: clip.eventDistance,
+    });
     const res = await runSearch(intent);
     setRetrieval((r) => ({ ...r, intent, result: res }));
     return res;
   }, [project, lib, runSearch, log]);
 
   const runAutoDesign = useCallback(async (sceneId: string, mode: AutoMode) => {
-    if (!project) return { placed: [], suggestions: [], skipped: 0 };
+    if (!project) return { placed: [], suggestions: [], skipped: 0, reports: [], details: [] };
     const scene = project.scenes.find((s) => s.id === sceneId);
-    if (!scene) return { placed: [], suggestions: [], skipped: 0 };
+    if (!scene) return { placed: [], suggestions: [], skipped: 0, reports: [], details: [] };
     const ctx = { sceneId: scene.id, start: scene.start, end: scene.end, title: scene.title, tags: scene.tags, summary: scene.summary, tension: scene.tension, motion: scene.motion, hits: scene.hits, spotting: project.spotting.filter((e) => e.sceneId === sceneId) };
     setRetrieval((r) => ({ ...r, busy: true }));
-    const result = await lib.autoDesign(ctx, project.id, mode, (msg) => log(msg, 'info'));
+    // the pipeline is VIDEO-DRIVEN: real detected events are passed through;
+    // no events (or demo project) → scene-text planner (backwards compatible)
+    const result = await lib.autoDesign(ctx, project.id, mode, (msg) => log(msg, 'info'), { events: project.soundEvents ?? [] });
+    setLastAutoReports(result.reports);
+    const detailByClip = new Map(result.details.map((d) => [d.clipId, d]));
     const unified: AudioClip[] = [];
     for (const sc of result.placed) {
-      const ac = await libraryClipToUnified(sc);
+      const d = detailByClip.get(sc.id);
+      const ac = await libraryClipToUnified(sc, d ?? { autoPlaced: true, searchQuery: undefined });
       unified.push(ac);
       addClip(ac);
     }
-    setRetrieval({ busy: false, intent: null, result: null, error: null, lastAuto: { mode, placed: unified.length, suggested: result.suggestions.length, skipped: result.skipped, at: Date.now() } });
+    setRetrieval({
+      busy: false,
+      intent: null,
+      result: null,
+      error: null,
+      lastAuto: { mode, placed: unified.length, suggested: result.suggestions.length, skipped: result.skipped, at: Date.now() },
+    });
     log(`auto sound design: ${mode} · placed ${unified.length} · suggested ${result.suggestions.length} · skipped ${result.skipped}`, 'ok');
-    return { placed: unified, suggestions: result.suggestions, skipped: result.skipped };
+    log(`auto sound design: video events driven by ${project.soundEvents?.length ?? 0} detected candidate(s)`, project.soundEvents?.length ? 'info' : 'warn');
+    return { placed: unified, suggestions: result.suggestions, skipped: result.skipped, reports: result.reports, details: result.details };
   }, [project, lib, libraryClipToUnified, addClip, log]);
 
   const addSpottingEvent = useCallback((sceneId: string, role: SoundRole, time: number) => {
@@ -900,6 +1058,8 @@ export function useStudio() {
     retrieval,
     runSearch,
     planScene,
+    planVideoScene,
+    lastAutoReports,
     auditionAsset,
     placeCandidate,
     replaceClipSource,
@@ -915,6 +1075,12 @@ export function useStudio() {
     exportCredits,
     libraryLoaded,
     clipCount,
+    // contextual video analysis (autonomous sound design driver)
+    analyzingVideo,
+    videoAnalysisLog,
+    soundEvents: project?.soundEvents ?? [],
+    soundAnalysis: project?.soundAnalysis ?? null,
+    reanalyzeVideo,
     providerStatuses: () => lib.providers().map((p) => p.status()),
     reset: () => {
       engine.stop();
@@ -926,6 +1092,8 @@ export function useStudio() {
       setSelectedClipId(null);
       setRange(null);
       setRetrieval({ busy: false, intent: null, result: null, error: null, lastAuto: null });
+      setLastAutoReports([]);
+      setVideoAnalysisLog(null);
     },
   };
 }

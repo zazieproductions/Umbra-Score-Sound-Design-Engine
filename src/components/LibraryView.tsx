@@ -4,12 +4,14 @@ import {
   ChevronDown,
   Ear,
   ExternalLink,
+  Eye,
   FileJson,
   FileText,
   ListMusic,
   Loader,
   Lock,
   Play,
+  RefreshCw,
   Search,
   Shield,
   Sparkles,
@@ -64,9 +66,20 @@ function AutoSoundDesign({ studio }: { studio: Studio }) {
   const mode = studio.libSettings.autoMode;
   const [open, setOpen] = useState(false);
   const [densityOpen, setDensityOpen] = useState(false);
-  const intents = useMemo(() => studio.planScene(s.id), [studio, s.id]);
+  const [eventsOpen, setEventsOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
+  const sceneEvents = useMemo(
+    () => (studio.soundEvents ?? []).filter((e) => e.sceneId === s.id || !e.sceneId),
+    [studio.soundEvents, s.id],
+  );
+  const videoDriven = sceneEvents.length > 0;
+  const intents = useMemo(
+    () => (videoDriven ? studio.planVideoScene(s.id) : studio.planScene(s.id)),
+    [studio, s.id, videoDriven],
+  );
   const running = studio.retrieval.busy;
   const last = studio.retrieval.lastAuto;
+  const reports = studio.lastAutoReports;
 
   const modes: { id: AutoMode; label: string; note: string }[] = [
     { id: 'off', label: 'OFF', note: 'No library retrieval.' },
@@ -79,11 +92,51 @@ function AutoSoundDesign({ studio }: { studio: Studio }) {
   return (
     <Panel
       title="Auto Sound Design"
-      sub={`Scene ${s.index} · ${s.title} · planner derived ${intents.filter((i) => !i.isSilenceChoice).length} retrieval intent(s)`}
+      sub={`Scene ${s.index} · ${s.title} · ${videoDriven ? `VIDEO-DRIVEN · ${sceneEvents.length} detected event candidate(s)` : `planner derived ${intents.filter((i) => !i.isSilenceChoice).length} intent(s)`}`}
       right={
         <span className="chip tnum">{last ? `${last.placed} placed / ${last.suggested} suggested` : 'idle'}</span>
       }
     >
+      <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/[0.07] bg-black/25 px-2.5 py-1.5">
+        <Eye size={11} className={studio.analyzingVideo ? 'animate-pulse text-orchid' : videoDriven ? 'text-brine' : 'text-dim'} />
+        <span className="min-w-0 flex-1 truncate text-[9.5px] text-ash" title={studio.videoAnalysisLog ?? undefined}>
+          {studio.analyzingVideo ? 'analyzing video pixels…' : studio.videoAnalysisLog ?? 'video analysis: not run'}
+        </span>
+        <button className="btn px-1.5 py-0.5 text-[9px]" onClick={() => void studio.reanalyzeVideo()} disabled={studio.analyzingVideo} title="Re-run vision analysis">
+          <RefreshCw size={9} className={studio.analyzingVideo ? 'animate-spin' : ''} /> re-analyze
+        </button>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <button
+          className={`btn px-2 py-1 text-[10px] ${eventsOpen ? 'border-brine/40 text-brine' : ''}`}
+          onClick={() => setEventsOpen((o) => !o)}
+          title="Detected events and their evidence"
+        >
+          <Eye size={10} /> Events {sceneEvents.length > 0 && <span className="tnum">({sceneEvents.length})</span>} <ChevronDown size={10} className={eventsOpen ? 'rotate-180' : ''} />
+        </button>
+        {sceneEvents.length > 0 && eventsOpen && (
+          <div className="w-full rounded-lg border border-white/[0.07] bg-black/25 p-2">
+            {sceneEvents.map((ev) => (
+              <div key={ev.id} className="flex items-start gap-2 border-b border-white/[0.04] py-1 last:border-0">
+                <span className="tnum w-[52px] shrink-0 pt-0.5 text-[9.5px] text-bone">{tc(ev.timestamp, true)}</span>
+                <span className="w-[92px] shrink-0 truncate text-[9.5px] text-ash" title={`${ev.event} → ${ev.suggestedRole}`}>
+                  {ev.event}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[9.5px] text-dim" title={ev.evidence.join(' · ')}>
+                  {ev.query}
+                </span>
+                <span
+                  className={`chip shrink-0 text-[8.5px] ${ev.confidence >= 0.8 ? 'border-brine/40 text-brine' : ev.confidence >= 0.6 ? 'border-ash/40 text-ash' : 'border-dim/40 text-dim'}`}
+                >
+                  {(ev.confidence * 100).toFixed(0)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <span className="chip ml-auto border-dim/30 text-dim">event threshold {(studio.libSettings.eventConfidenceThreshold * 100).toFixed(0)}%</span>
+      </div>
       <div className="mb-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
         {modes.map((m) => (
           <button
@@ -150,9 +203,33 @@ function AutoSoundDesign({ studio }: { studio: Studio }) {
       )}
 
       {last && (
-        <p className="text-[9.5px] text-dim">
-          last run: {last.mode} · {last.placed} placed · {last.suggested} suggested · {last.skipped} skipped — all clips remain separate + undoable.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[9.5px] text-dim">
+            last run: {last.mode} · {last.placed} placed · {last.suggested} suggested · {last.skipped} skipped — all clips remain separate + undoable.
+          </p>
+          {reports.length > 0 && (
+            <button className="btn px-1.5 py-0.5 text-[9px]" onClick={() => setReportsOpen((o) => !o)}>
+              <ListMusic size={9} /> report ({reports.length}) <ChevronDown size={9} className={reportsOpen ? 'rotate-180' : ''} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {reportsOpen && reports.length > 0 && (
+        <div className="mt-2 flex max-h-44 flex-col gap-0.5 overflow-y-auto rounded-lg border border-white/[0.07] bg-black/25 p-2">
+          {reports.map((r) => (
+            <div key={`${r.intentId}-${r.status}`} className="flex items-start gap-2 py-0.5">
+              <span className={`chip shrink-0 text-[8px] ${r.status === 'placed' ? 'border-brine/40 text-brine' : r.status === 'suggested' ? 'border-ash/40 text-ash' : r.status === 'silence' ? 'border-dim/40 text-dim' : 'border-ember/40 text-ember'}`}>
+                {r.status}
+              </span>
+              <span className="tnum w-[56px] shrink-0 pt-0.5 text-[9px] text-bone">{r.eventTimestamp !== undefined ? tc(r.eventTimestamp, true) : '—'}</span>
+              <span className="min-w-0 flex-1 truncate text-[9.5px] text-dim" title={r.reason}>
+                {r.query || ROLE_LABELS[r.role]}
+              </span>
+              {r.match !== undefined && <span className="tnum shrink-0 text-[9px] text-ash">{(r.match * 100).toFixed(0)}%</span>}
+            </div>
+          ))}
+        </div>
       )}
     </Panel>
   );
