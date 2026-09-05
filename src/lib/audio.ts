@@ -18,6 +18,12 @@ interface Live {
 export class ScoreEngine {
   ctx: AudioContext | null = null;
   master: MasterChain | null = null;
+
+  /** master graph accessor for sample-clip polling (retrieved audio) */
+  getMasterNode(): MasterChain {
+    this.ensure();
+    return this.master!;
+  }
   private live = new Map<string, Live>();
   private raf = 0;
   private running = false;
@@ -165,6 +171,32 @@ export class ScoreEngine {
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+  }
+
+  /** Listen to a retrieved library buffer through the master graph. */
+  auditionBuffer(buffer: AudioBuffer, duration = 3) {
+    const ctx = this.ensure();
+    void ctx.resume();
+    const master = this.master!;
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.9, now + 0.03);
+    g.gain.setValueAtTime(0.9, now + Math.max(0.05, duration - 0.25));
+    g.gain.linearRampToValueAtTime(0, now + Math.max(0.3, duration));
+    src.connect(g);
+    g.connect(master.musicSum);
+    src.start(now);
+    src.stop(now + Math.max(0.35, duration + 0.1));
+    if (!this.running) {
+      this.running = true;
+      this.loop();
+      window.setTimeout(() => {
+        if (this.live.size === 0) this.running = false;
+      }, (duration + 1.5) * 1000);
+    }
   }
 
   /** Short solo audition of one layer, independent of the transport. */

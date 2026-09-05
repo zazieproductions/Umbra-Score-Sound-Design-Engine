@@ -2,6 +2,8 @@ import { buildMaster, type MasterParams } from './dsp';
 import { buildVoice } from './voices';
 import { mulberry32 } from './prng';
 import { KIND_META, type Layer, type Project, type Scene } from './types';
+import { buildClipVoice } from './library/clipAudio';
+import type { SoundClip } from './library/types';
 
 /** Static fader target for a layer — mirrors applyStrip() in voices.ts. */
 function faderTarget(l: Layer, tension: number): number {
@@ -30,6 +32,10 @@ export interface RenderOpts {
   bitDepth?: 16 | 24;
   /** limit render length (seconds) */
   maxSeconds?: number;
+  /** decoded library audio, keyed by clip cacheKey */
+  clipBuffers?: Map<string, AudioBuffer>;
+  /** when rendering within a scene window, keep global clip offsets */
+  clipOffsetSeconds?: number;
   onProgress?: (p: number) => void;
 }
 
@@ -111,6 +117,33 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
           if (h >= start && h < end) voice.fire(h, 0.95, layer);
         }
       }
+    }
+  }
+}
+
+/** Schedule retrieved/imported sample clips into the offline graph. */
+function scheduleClips(
+  ctx: OfflineAudioContext,
+  master: ReturnType<typeof buildMaster>,
+  clips: SoundClip[],
+  buffers: Map<string, AudioBuffer> | undefined,
+  total: number,
+  clipOffset = 0,
+) {
+  if (!buffers || !clips.length) return;
+  for (const clip of clips) {
+    if (clip.muted) continue;
+    const start = Math.max(0, clip.start - clipOffset);
+    const end = Math.min(total, clip.end - clipOffset);
+    if (end - start < 0.02) continue;
+    const buf = buffers.get(clip.cacheKey);
+    if (!buf) continue;
+    try {
+      const voice = buildClipVoice(master, { ...clip, start, end }, buf);
+      voice.start(start);
+      voice.stop(end + 0.6);
+    } catch {
+      /* a bad clip must never break the bounce */
     }
   }
 }
@@ -375,6 +408,7 @@ export async function renderScore(
   const ctx = new OfflineCtor(2, Math.ceil(total * sampleRate), sampleRate);
   const master = buildMaster(ctx, masterParams, 'render');
   schedule(ctx, master, scenes, total - 2.5);
+  scheduleClips(ctx, master, project.clips, opts.clipBuffers, total - 2.5, offset);
 
   opts.onProgress?.(8);
   const buffer = await ctx.startRendering();

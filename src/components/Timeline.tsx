@@ -5,6 +5,17 @@ import { KIND_META } from '../lib/types';
 import { waveform } from '../lib/generate';
 import { tc } from '../lib/format';
 import type { LayerKind } from '../lib/types';
+import { ROLE_LABELS } from '../lib/library/types';
+import type { SoundClip } from '../lib/library/types';
+
+const SOURCE_STYLE: Record<SoundClip['source'], { label: string; color: string }> = {
+  LIB: { label: 'LIB', color: '#4b8f9a' },
+  USR: { label: 'USR', color: '#7d6bff' },
+  GEN: { label: 'GEN', color: '#a86bd6' },
+  VID: { label: 'VID', color: '#e0663f' },
+  PROC: { label: 'PROC', color: '#b9a37e' },
+  PIX: { label: 'PIX', color: '#d8a24a' },
+};
 
 function WaveRow({
   seed,
@@ -214,6 +225,19 @@ export default function Timeline({ studio }: { studio: Studio }) {
               );
             })}
 
+            {(() => {
+              const sceneClips = project.clips.filter((c) => c.sceneId === activeScene?.id);
+              if (!sceneClips.length) return null;
+              return (
+                <div className="relative h-[30px] border-b border-white/[0.04]">
+                  <span className="eyebrow absolute left-1 top-0 z-10 py-0.5 text-[7.5px] text-brine/80">RETRIEVED</span>
+                  {sceneClips.map((c) => (
+                    <ClipBlock key={c.id} studio={studio} clip={c} duration={duration} />
+                  ))}
+                </div>
+              );
+            })()}
+
             <div className="pointer-events-none absolute top-0 z-10 h-full" style={{ left: `${playheadPct}%` }}>
               <div className={`h-full w-[1.5px] bg-ember ${playing && audioOn ? 'shadow-[0_0_14px_3px_rgba(255,59,92,0.55)]' : 'shadow-[0_0_8px_1px_rgba(255,59,92,0.4)]'}`} />
               <div className="absolute -left-[5px] top-0 h-2.5 w-3 rounded-b-sm bg-ember" />
@@ -222,5 +246,95 @@ export default function Timeline({ studio }: { studio: Studio }) {
         </div>
       </div>
     </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Retrieved sample clip block — draggable, trimmable, selectable.     */
+/* ------------------------------------------------------------------ */
+
+function ClipBlock({ studio, clip, duration }: { studio: Studio; clip: SoundClip; duration: number }) {
+  const [dragMode, setDragMode] = useState<'none' | 'move' | 'left' | 'right'>('none');
+  const [ox, setOx] = useState({ x: 0, start: clip.start, end: clip.end });
+  const meta = SOURCE_STYLE[clip.source];
+  const selected = studio.selectedClipId === clip.id;
+  const left = (clip.start / duration) * 100;
+  const width = ((clip.end - clip.start) / duration) * 100;
+
+  const begin = (e: React.MouseEvent, mode: 'move' | 'left' | 'right') => {
+    e.stopPropagation();
+    setDragMode(mode);
+    setOx({ x: e.clientX, start: clip.start, end: clip.end });
+    studio.setSelectedClipId(clip.id);
+  };
+
+  useEffect(() => {
+    if (dragMode === 'none') return;
+    const move = (e: MouseEvent) => {
+      const dxT = ((e.clientX - ox.x) / Math.max(1, duration)) * duration;
+      if (dragMode === 'move') {
+        const next = Math.max(0, ox.start + dxT);
+        studio.patchClip(clip.id, {
+          start: next,
+          end: next + (ox.end - ox.start),
+        });
+      } else if (dragMode === 'left') {
+        const start = Math.min(Math.max(0, ox.start + dxT), ox.end - 0.05);
+        studio.patchClip(clip.id, { start, offset: clip.offset + (start - ox.start) });
+      } else {
+        const end = Math.max(ox.end + dxT, ox.start + 0.05);
+        studio.patchClip(clip.id, { end });
+      }
+    };
+    const up = () => setDragMode('none');
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+  }, [dragMode, ox, clip.id, clip.offset, duration, studio]);
+
+  return (
+    <div
+      className={`group absolute top-[4px] h-[22px] cursor-grab overflow-hidden rounded-[4px] border select-none active:cursor-grabbing ${
+        selected ? 'ring-1 ring-inset ring-ember/70' : ''
+      }`}
+      style={{
+        left: `${left}%`,
+        width: `${width}%`,
+        borderColor: `${meta.color}66`,
+        background: `linear-gradient(180deg, ${meta.color}2e, ${meta.color}10)`,
+        opacity: clip.muted ? 0.35 : 1,
+      }}
+      onMouseDown={(e) => begin(e, 'move')}
+      onDoubleClick={() => void studio.auditionClip(clip.id)}
+      onClick={(e) => {
+        e.stopPropagation();
+        studio.setSelectedClipId(clip.id);
+      }}
+      title={`${clip.name} · ${ROLE_LABELS[clip.role]} · ${tc(clip.start, true)} · ${clip.asset.providerLabel} · ${clip.asset.license} · MATCH ${Math.round(clip.match * 100)}%`}
+    >
+      <span
+        className="absolute inset-y-0 left-0 w-[5px] cursor-ew-resize bg-white/20 opacity-0 group-hover:opacity-100"
+        onMouseDown={(e) => begin(e, 'left')}
+      />
+      <span
+        className="absolute inset-y-0 right-0 w-[5px] cursor-ew-resize bg-white/20 opacity-0 group-hover:opacity-100"
+        onMouseDown={(e) => begin(e, 'right')}
+      />
+      <span className="pointer-events-none absolute inset-y-0 left-[7px] flex items-center gap-1">
+        <span
+          className="tnum rounded-[2px] px-[3px] py-px text-[7px] font-bold text-void"
+          style={{ background: meta.color, opacity: 0.9 }}
+        >
+          {meta.label}
+        </span>
+        <span className="max-w-[120px] truncate text-[8.5px] text-bone/85">{clip.name}</span>
+      </span>
+      <span className="pointer-events-none absolute inset-y-0 right-[7px] hidden items-center text-[7.5px] text-ash/80 group-hover:flex">
+        {Math.round(clip.match * 100)}%
+      </span>
+    </div>
   );
 }

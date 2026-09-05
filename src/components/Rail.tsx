@@ -1,11 +1,12 @@
-import { Aperture, Boxes, CloudCog, Download, Layers, Radio, Settings, Waves } from 'lucide-react';
+import { Aperture, AudioLines, Boxes, CloudCog, Download, Layers, Radio, Settings, Waves } from 'lucide-react';
 
-export type ViewId = 'studio' | 'scenes' | 'pipeline' | 'assets' | 'exports' | 'cloud' | 'settings';
+export type ViewId = 'studio' | 'scenes' | 'pipeline' | 'library' | 'assets' | 'exports' | 'cloud' | 'settings';
 
 const ITEMS: { id: ViewId; label: string; icon: typeof Waves }[] = [
   { id: 'studio', label: 'Studio', icon: Waves },
   { id: 'scenes', label: 'Scenes', icon: Aperture },
   { id: 'pipeline', label: 'Pipeline', icon: Layers },
+  { id: 'library', label: 'Library', icon: AudioLines },
   { id: 'assets', label: 'Assets', icon: Boxes },
   { id: 'exports', label: 'Exports', icon: Download },
   { id: 'cloud', label: 'Cloud', icon: CloudCog },

@@ -3,6 +3,13 @@ import type { Layer, LayerKind, Project, RenderJob, Scene } from './types';
 import { addLayer as makeLayer, analyzeProject, regenerateLayer } from './generate';
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
 import { download, renderScore, renderStem } from './render';
+import { RetrievalService } from './library/service';
+import { soundCache, provenanceStore, credsStore, settingsStore, shortId } from './library/cache';
+import { pollClips, clearClipScheduler, makeClipScheduler } from './library/clipAudio';
+import { exportCreditsJson, exportCreditsTxt, downloadText } from './library/credits';
+import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundCredentials, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset } from './library/types';
+import { EMPTY_FREESOUND_CREDS, DEFAULT_LIBRARY_SETTINGS } from './library/types';
+import { tc } from './format';
 
 export interface LogLine {
   id: string;
@@ -30,6 +37,78 @@ export function useStudio() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timers = useRef<number[]>([]);
 
+  /* -------------------------------------------------- sound library -- */
+
+  const [creds, setCreds] = useState<FreesoundCredentials>(() =>
+    credsStore.load('umbra.library.freesound.creds.v1', EMPTY_FREESOUND_CREDS),
+  );
+  const [libSettings, setLibSettingsState] = useState<LibrarySettings>(() =>
+    settingsStore.load<LibrarySettings>(DEFAULT_LIBRARY_SETTINGS),
+  );
+  const serviceRef = useRef<RetrievalService | null>(null);
+  if (!serviceRef.current) serviceRef.current = new RetrievalService(() => creds, libSettings);
+  const [retrieval, setRetrieval] = useState<RetrievalState>({
+    busy: false,
+    intent: null,
+    result: null,
+    error: null,
+    lastAuto: null,
+  });
+  const [favorites, setFavorites] = useState(0);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
+  const clipBuffers = useRef(new Map<string, AudioBuffer>());
+  const clipScheduler = useRef(makeClipScheduler());
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+
+  /** Load cached audio for placed clips into the playback buffer map. */
+  const loadClipBuffers = useCallback(async () => {
+    const clips = project?.clips ?? [];
+    for (const c of clips) {
+      if (clipBuffers.current.has(c.cacheKey)) continue;
+      const rec = await soundCache.get(c.cacheKey);
+      if (!rec) continue;
+      try {
+        const buf = await decodeForPlayback(rec.blob);
+        clipBuffers.current.set(c.cacheKey, buf);
+      } catch {
+        /* skip undecodable */
+      }
+    }
+    setLibraryLoaded(true);
+  }, [project?.clips]);
+
+  useEffect(() => {
+    void loadClipBuffers();
+    void provenanceStore.list().then(() => setLibraryLoaded(true));
+    setFavorites(localStorage.getItem('umbra.library.favorites') ? JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]').length : 0);
+  }, [loadClipBuffers]);
+
+  const lib = serviceRef.current!;
+
+  const setSettingsPatch = useCallback((patch: Partial<LibrarySettings>) => {
+    setLibSettingsState((s) => {
+      const next = { ...s, ...patch };
+      settingsStore.save(next);
+      return next;
+    });
+  }, []);
+
+  const setLicensePolicy = useCallback((mode: LicenseMode, accepted?: LicenseClass[]) => {
+    setLibSettingsState((s) => {
+      const next = { ...s, licensePolicy: { mode, accepted: accepted ?? s.licensePolicy.accepted } };
+      settingsStore.save(next);
+      return next;
+    });
+  }, []);
+
+  const saveCreds = useCallback((patch: Partial<FreesoundCredentials>) => {
+    setCreds((c) => {
+      const next = { ...c, ...patch };
+      credsStore.save('umbra.library.freesound.creds.v1', next);
+      return next;
+    });
+  }, []);
+
   const log = useCallback((text: string, level: LogLine['level'] = 'info') => {
     setLogs((prev) => [{ id: `lg${logSeq++}`, at: Date.now(), level, text }, ...prev].slice(0, 120));
   }, []);
@@ -45,6 +124,7 @@ export function useStudio() {
     () => () => {
       timers.current.forEach((t) => window.clearTimeout(t));
       engine.stop();
+      clearClipScheduler(clipScheduler.current);
     },
     [],
   );
@@ -156,6 +236,25 @@ export function useStudio() {
     return () => cancelAnimationFrame(raf);
   }, [playing, project]);
 
+  // poll retrieved sample clips against the transport every frame
+  useEffect(() => {
+    if (!playing || !project || !audioOn) {
+      clearClipScheduler(clipScheduler.current);
+      return;
+    }
+    let raf = 0;
+    const loop = () => {
+      try {
+        pollClips(clipScheduler.current, engine.getMasterNode(), project.clips, clipBuffers.current, time, 0.55);
+      } catch {
+        /* clip poll is best-effort */
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, project, audioOn, time]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -220,6 +319,291 @@ export function useStudio() {
     },
     [log],
   );
+
+  /* ---------------------------------------------- library retrieval -- */
+
+  const sceneContext = useCallback(
+    (sceneId: string) => {
+      const s = project?.scenes.find((x) => x.id === sceneId) ?? project?.scenes[0];
+      if (!s || !project) return null;
+      return {
+        sceneId: s.id,
+        start: s.start,
+        end: s.end,
+        title: s.title,
+        tags: s.tags,
+        summary: s.summary,
+        tension: s.tension,
+        motion: s.motion,
+        hits: s.hits,
+        spotting: project.spotting.filter((e) => e.sceneId === s.id),
+      };
+    },
+    [project],
+  );
+
+  const runSearch = useCallback(
+    async (intent: RetrievalIntent) => {
+      setRetrieval((r) => ({ ...r, busy: true, error: null, intent }));
+      log(`retrieval: "${intent.query}" · role ${intent.role}`, 'info');
+      const result = await lib.search(intent);
+      setRetrieval({ busy: false, intent, result, error: result.error, lastAuto: null });
+      log(
+        result.error && !result.candidates.length
+          ? `retrieval unavailable: ${result.error}`
+          : `retrieval: ${result.count} raw · ${result.candidates.length} ranked in ${result.elapsedMs}ms`,
+        result.candidates.length ? 'ok' : 'warn',
+      );
+      return result;
+    },
+    [lib, log],
+  );
+
+  const planScene = useCallback(
+    (sceneId: string) => {
+      const ctx = sceneContext(sceneId);
+      if (!ctx) return [];
+      return lib.planForScene(ctx);
+    },
+    [lib, sceneContext],
+  );
+
+  /** Audition a candidate preview without leaving Umbra. */
+  const auditionAsset = useCallback(
+    async (asset: LibraryAsset) => {
+      try {
+        setRetrieval((r) => ({ ...r, busy: true, error: null }));
+        const { blob, cacheKey } = await lib.ensurePreview(asset);
+        const buf = await decodeForPlayback(blob);
+        clipBuffers.current.set(cacheKey, buf);
+        engine.auditionBuffer(buf, asset.duration);
+        log(`audition: ${asset.title} · ${asset.providerLabel} · ${asset.license}`, 'info');
+      } catch (e) {
+        setRetrieval((r) => ({ ...r, busy: false, error: (e as Error).message }));
+        log(`audition failed: ${(e as Error).message}`, 'warn');
+      } finally {
+        setRetrieval((r) => ({ ...r, busy: false }));
+      }
+    },
+    [lib, log],
+  );
+
+  /** Place a candidate as a real editable clip on the timeline. */
+  const placeCandidate = useCallback(
+    async (candidate: RankedCandidate, intent: RetrievalIntent, start: number, patch?: Partial<SoundClip>) => {
+      if (!project) return null;
+      if (!candidate.licenseOk) {
+        log(`placement blocked: ${candidate.licenseReason}`, 'warn');
+        setRetrieval((r) => ({ ...r, error: candidate.licenseReason }));
+        return null;
+      }
+      try {
+        setRetrieval((r) => ({ ...r, busy: true, error: null }));
+        const clip = await lib.placeClip({
+          sceneId: intent.sceneId,
+          intent,
+          candidate,
+          start,
+          projectId: project.id,
+        });
+        const final: SoundClip = { ...clip, ...(patch ?? {}) };
+        await lib.recordProvenance(final, project.id);
+        setProject((cur) => (cur ? { ...cur, clips: [...cur.clips, final] } : cur));
+        setSelectedClipId(final.id);
+        setRetrieval((r) => ({ ...r, busy: false, result: r.result }));
+        log(`placed: ${final.name} @ ${tc(start, true)} · ${final.asset.providerLabel} · match ${Math.round(final.match * 100)}%`, 'ok');
+        return final;
+      } catch (e) {
+        setRetrieval((r) => ({ ...r, busy: false, error: (e as Error).message }));
+        log(`placement failed: ${(e as Error).message}`, 'warn');
+        return null;
+      }
+    },
+    [project, lib, log],
+  );
+
+  /** ONE-CLICK REPLACE: keep timeline position/gain/pan/fades/transform,
+   *  swap only the source audio (and its provenance). */
+  const replaceClipSource = useCallback(
+    async (clipId: string, candidate: RankedCandidate) => {
+      if (!project) return null;
+      const clip = project.clips.find((c) => c.id === clipId);
+      if (!clip) return null;
+      if (!candidate.licenseOk) {
+        log(`replace blocked: ${candidate.licenseReason}`, 'warn');
+        return null;
+      }
+      try {
+        const intent = lib.alternativeIntent(clip, 'rpl');
+        const next = await lib.placeClip({
+          sceneId: clip.sceneId,
+          intent,
+          candidate,
+          start: clip.start,
+          projectId: project.id,
+          familyId: clip.familyId,
+          variantIndex: clip.variantIndex,
+        });
+        const preserved: SoundClip = lib.applyReplacement(clip, next);
+        await lib.recordProvenance(preserved, project.id);
+        setProject((cur) =>
+          cur ? { ...cur, clips: cur.clips.map((c) => (c.id === clipId ? preserved : c)) } : cur,
+        );
+        log(`replaced source: ${clip.name} → ${next.name} (timeline edits preserved)`, 'ok');
+        return preserved;
+      } catch (e) {
+        log(`replacement failed: ${(e as Error).message}`, 'warn');
+        return null;
+      }
+    },
+    [project, lib, log],
+  );
+
+  const findAlternatives = useCallback(
+    async (clipId: string) => {
+      const clip = project?.clips.find((c) => c.id === clipId);
+      if (!clip) return null;
+      return runSearch(lib.alternativeIntent(clip));
+    },
+    [project, runSearch, lib],
+  );
+
+  /** AUTO SOUND DESIGN (suggest / auto-safe / auto-full). */
+  const runAutoDesign = useCallback(
+    async (sceneId: string, mode: AutoMode) => {
+      const ctx = sceneContext(sceneId);
+      if (!ctx || !project) return;
+      if (mode === 'off') {
+        log('auto sound design: off — no library retrieval', 'info');
+        return;
+      }
+      setRetrieval((r) => ({ ...r, busy: true, error: null }));
+      log(`auto sound design: ${mode} · scene ${ctx.title} · density ${lib.settings.density}`, 'info');
+      try {
+        const out = await lib.autoDesign(ctx, project.id, mode, (msg) => log(`retrieval: ${msg}`, 'info'));
+        if (out.placed.length) {
+          setProject((cur) => (cur ? { ...cur, clips: [...cur.clips, ...out.placed] } : cur));
+          const first = out.placed[0];
+          if (first) setSelectedClipId(first.id);
+        }
+        setRetrieval({
+          busy: false,
+          intent: null,
+          result: null,
+          error: null,
+          lastAuto: { mode, placed: out.placed.length, suggested: out.suggestions.length, skipped: out.skipped, at: Date.now() },
+        });
+        log(
+          `auto design ${mode}: ${out.placed.length} placed · ${out.suggestions.length} suggested · ${out.skipped} skipped`,
+          out.placed.length ? 'ok' : 'warn',
+        );
+      } catch (e) {
+        setRetrieval((r) => ({ ...r, busy: false, error: (e as Error).message }));
+        log(`auto design failed: ${(e as Error).message}`, 'warn');
+      }
+    },
+    [project, sceneContext, lib, log],
+  );
+
+  /* --------------------------------------------- spotting + clips ---- */
+
+  const addSpottingEvent = useCallback(
+    (sceneId: string, role: SoundRole, time: number) => {
+      if (!project) return null;
+      const ev: SpottingEvent = {
+        id: shortId('ev'),
+        sceneId,
+        label: `${role.replace(/_/g, ' ').toLowerCase()} @ ${tc(time, true)}`,
+        role,
+        time,
+        createdAt: Date.now(),
+      };
+      setProject((cur) => (cur ? { ...cur, spotting: [...cur.spotting, ev] } : cur));
+      log(`spotting: ${ev.label}`, 'info');
+      return ev;
+    },
+    [project, log],
+  );
+
+  const patchClip = useCallback((clipId: string, patch: Partial<SoundClip>) => {
+    setProject((cur) => (cur ? { ...cur, clips: cur.clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)) } : cur));
+  }, []);
+
+  const removeClip = useCallback(
+    (clipId: string) => {
+      setProject((cur) => (cur ? { ...cur, clips: cur.clips.filter((c) => c.id !== clipId) } : cur));
+      void provenanceStore.remove(clipId);
+      setSelectedClipId((id) => (id === clipId ? null : id));
+      log('clip removed — provenance entry cleared', 'warn');
+    },
+    [log],
+  );
+
+  const auditionClip = useCallback(
+    async (clipId: string) => {
+      const clip = project?.clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const buf = clipBuffers.current.get(clip.cacheKey);
+      if (!buf) {
+        const rec = await soundCache.get(clip.cacheKey);
+        if (!rec) return;
+        const d = await decodeForPlayback(rec.blob);
+        clipBuffers.current.set(clip.cacheKey, d);
+        engine.auditionBuffer(d, clip.end - clip.start);
+        return;
+      }
+      engine.auditionBuffer(buf, clip.end - clip.start);
+      log(`audition clip: ${clip.name} @ ${tc(clip.start, true)}`, 'info');
+    },
+    [project, log],
+  );
+
+  const clearUnusedCache = useCallback(async () => {
+    if (!project) return;
+    const removed = await soundCache.clearUnused([project.id]);
+    log(`cache: removed ${removed} unused audio asset(s) — project files kept`, 'warn');
+    setLibraryLoaded(false);
+    void loadClipBuffers();
+  }, [project, loadClipBuffers, log]);
+
+  const exportCredits = useCallback(
+    async (kind: 'txt' | 'json') => {
+      if (!project) return;
+      const entries = await provenanceStore.list();
+      const projectEntries = entries.filter((e) => project.clips.some((c) => c.id === e.clipId));
+      if (kind === 'json') {
+        downloadText('sound_credits.json', exportCreditsJson(projectEntries, project.name, project.duration), 'application/json');
+      } else {
+        downloadText('sound_credits.txt', exportCreditsTxt(projectEntries, project.name, project.duration));
+      }
+      log(`exported sound_credits.${kind} (${projectEntries.length} assets)`, 'ok');
+    },
+    [project, log],
+  );
+
+  const importUserAudio = useCallback(
+    async (file: File, meta: Parameters<RetrievalService['userLibrary']['importFile']>[1]) => {
+      const rec = await lib.userLibrary.importFile(file, meta);
+      log(`user library: imported ${rec.name} (${(file.size / 1e6).toFixed(1)} MB, offline-available)`, 'ok');
+      return rec;
+    },
+    [lib, log],
+  );
+
+  const toggleFavorite = useCallback((asset: LibraryAsset) => {
+    const list = JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]');
+    const keyExists = list.some((f: { asset: LibraryAsset }) => f.asset.provider === asset.provider && f.asset.soundId === asset.soundId);
+    const next = keyExists
+      ? list.filter((f: { asset: LibraryAsset }) => !(f.asset.provider === asset.provider && f.asset.soundId === asset.soundId))
+      : [{ asset, at: Date.now() }, ...list];
+    localStorage.setItem('umbra.library.favorites', JSON.stringify(next));
+    setFavorites(next.length);
+  }, []);
+
+  const isFavorite = useCallback((asset: LibraryAsset) => {
+    const list = JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]');
+    return list.some((f: { asset: LibraryAsset }) => f.asset.provider === asset.provider && f.asset.soundId === asset.soundId);
+  }, []);
 
   /* ------------------------------------------------------------ edits */
 
@@ -340,7 +724,7 @@ export function useStudio() {
         const result =
           opts?.layer && opts.scene
             ? await renderStem(opts.scene, opts.layer, master)
-            : await renderScore(project, master, { maxSeconds: opts?.maxSeconds ?? 240 }, opts?.scene);
+            : await renderScore(project, master, { maxSeconds: opts?.maxSeconds ?? 240, clipBuffers: clipBuffers.current }, opts?.scene);
         window.clearInterval(creep);
         patchJob(id, { progress: 90, state: 'encoding' });
         const filename =
@@ -380,6 +764,8 @@ export function useStudio() {
 
   const readyCount = project ? project.scenes.filter((s) => s.status === 'ready').length : 0;
   const layerCount = project ? project.scenes.reduce((a, s) => a + s.layers.length, 0) : 0;
+  const clipCount = project?.clips.length ?? 0;
+  const selectedClip = project?.clips.find((c) => c.id === selectedClipId) ?? null;
 
   return {
     project,
@@ -416,15 +802,61 @@ export function useStudio() {
     readyCount,
     layerCount,
     log,
+    // ---- sound library ----
+    creds,
+    saveCreds,
+    libSettings,
+    setSettingsPatch,
+    setLicensePolicy,
+    retrieval,
+    runSearch,
+    planScene,
+    auditionAsset,
+    placeCandidate,
+    replaceClipSource,
+    findAlternatives,
+    runAutoDesign,
+    addSpottingEvent,
+    patchClip,
+    removeClip,
+    auditionClip,
+    selectedClipId,
+    setSelectedClipId,
+    selectedClip,
+    clipCount,
+    favorites,
+    toggleFavorite,
+    isFavorite,
+    importUserAudio,
+    clearUnusedCache,
+    exportCredits,
+    libraryLoaded,
+    providerStatuses: () => lib.providers().map((p) => p.status()),
     reset: () => {
       engine.stop();
+      clearClipScheduler(clipScheduler.current);
       setProject(null);
       setPlaying(false);
       setTime(0);
       setJobs([]);
       setLogs([]);
+      setSelectedClipId(null);
+      setRetrieval({ busy: false, intent: null, result: null, error: null, lastAuto: null });
     },
   };
+}
+
+/* ------------------------------------------------------- helpers ---- */
+
+async function decodeForPlayback(blob: Blob): Promise<AudioBuffer> {
+  const ab = await blob.arrayBuffer();
+  const Ctor: typeof AudioContext = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const ctx = new Ctor();
+  try {
+    return await ctx.decodeAudioData(ab);
+  } finally {
+    await ctx.close().catch(() => undefined);
+  }
 }
 
 export type Studio = ReturnType<typeof useStudio>;

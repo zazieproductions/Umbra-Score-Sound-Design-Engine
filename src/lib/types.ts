@@ -66,6 +66,10 @@ export interface Project {
   resolution: string;
   videoUrl: string | null;
   scenes: Scene[];
+  /** retrieved / imported sample clips placed on the timeline */
+  clips: import('./library/types').SoundClip[];
+  /** user-marked final-cut events (e.g. DOOR OPEN @ 00:18.4) */
+  spotting: import('./library/types').SpottingEvent[];
   createdAt: number;
 }
 

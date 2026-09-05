@@ -230,6 +230,7 @@ npm install
 npm run dev        # Development
 npm run build     # Production build
 npm run lint      # Linting
+npm test          # Sound-library retrieval acceptance tests (mocked Freesound API)
 
 # Backend
 cd backend

@@ -26,6 +26,7 @@ import { DEMO_ASSETS, addLayer } from '../lib/generate';
 import { bytes, tc } from '../lib/format';
 import { MasterStrip } from './RightPanel';
 import { Slider } from './LayerPanel';
+import { FreesoundSettings, LicenseSettings } from './SoundLibrarySettings';
 
 /* ------------------------------------------------------------------ shell */
 
@@ -606,6 +607,9 @@ export function SettingsView({ studio }: { studio: Studio }) {
             <MasterStrip studio={studio} />
           </Panel>
 
+          <FreesoundSettings studio={studio} />
+          <LicenseSettings studio={studio} />
+
           <Panel title="Workspace" sub="studio plan · 4 seats">
             <div className="flex flex-col gap-2">
               {[
@@ -619,8 +623,8 @@ export function SettingsView({ studio }: { studio: Studio }) {
                   <span className="tnum text-[11px] text-bone">{v}</span>
                 </div>
               ))}
-              <button className="btn mt-1" onClick={() => studio.log('workspace: cache purged (1.2 GB reclaimed)', 'warn')}>
-                <Server size={12} /> Purge local cache
+              <button className="btn mt-1" onClick={() => void studio.clearUnusedCache()}>
+                <Server size={12} /> Clear unused sound cache
               </button>
               {studio.project && (
                 <button className="btn text-ember/85 hover:text-ember" onClick={studio.reset}>

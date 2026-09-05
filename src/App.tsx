@@ -6,6 +6,7 @@ import Viewer from './components/Viewer';
 import Timeline from './components/Timeline';
 import RightPanel from './components/RightPanel';
 import { AssetsView, CloudView, ExportsView, PipelineView, ScenesView, SettingsView } from './components/Views';
+import LibraryView from './components/LibraryView';
 import { useStudio } from './lib/useStudio';
 import { tc } from './lib/format';
 
@@ -38,7 +39,7 @@ export default function App() {
       <Rail
         view={view}
         onView={setView}
-        badge={{ scenes: project?.scenes.length, exports: activeJobs || undefined, assets: undefined }}
+        badge={{ scenes: project?.scenes.length, exports: activeJobs || undefined, library: project?.clips.length || undefined }}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -112,6 +113,8 @@ export default function App() {
               <ScenesView studio={studio} />
             ) : view === 'pipeline' ? (
               <PipelineView studio={studio} />
+            ) : view === 'library' ? (
+              <LibraryView studio={studio} />
             ) : view === 'assets' ? (
               <AssetsView studio={studio} />
             ) : view === 'exports' ? (
