@@ -43,16 +43,26 @@ external binary (not a pip package) enabling video metadata/thumbnails.
 
 ## Configuration
 
-Only one variable, only when the backend is not on the default port/host:
-
 ```bash
-cp .env.example .env   # then edit VITE_UMBRA_BACKEND if needed
+cp .env.example .env
 ```
 
-Freesound tokens are entered in-app (Library → Settings) and stored in local
-IndexedDB — never in files, never committed. `python
-scripts/verify_environment.py [--json]` reports real packages, devices, and
-checkpoints, then tells you the next useful command.
+`.env` holds local, git-ignored settings — most importantly the Freesound API
+key, which the **backend** uses (the browser never sees it):
+
+```dotenv
+FREESOUND_API_KEY=your-freesound-client-secret   # freesound.org/apiv2/apply
+VITE_UMBRA_BACKEND=http://127.0.0.1:8000         # only if the backend is elsewhere
+```
+
+> Never commit `.env` or any real credential, and never put a secret in a
+> `VITE_` variable — those are inlined into the browser bundle.
+
+Full walkthrough (create the key, start both servers, verify the connection,
+honest failure modes): [`FREESOUND.md`](FREESOUND.md).
+
+`python scripts/verify_environment.py [--json]` reports real packages, devices,
+and checkpoints, then tells you the next useful command.
 
 ## Troubleshooting
 
@@ -62,4 +72,4 @@ checkpoints, then tells you the next useful command.
 | Backend 404 on `/api/*` from UI | Use the Vite dev server URL, not `:8000` directly; browser must use relative `/api` |
 | Python version errors | `python3 --version` must be 3.11/3.12 |
 | Video features unavailable | `ffmpeg`/`ffprobe` on PATH? (`/api/analysis/toolchain`) |
-| Freesound search inert | Token set in Library → Settings? License policy excluding the result class? |
+| Freesound search inert | Backend running? `GET /api/integrations/freesound/status` — key configured/connected? License policy excluding the result class? See [`FREESOUND.md`](FREESOUND.md) |

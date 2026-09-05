@@ -29,7 +29,7 @@ export class UserLibraryProvider implements SoundLibraryProvider {
     offline: true,
   };
 
-  status(): ProviderStatus {
+  async status(): Promise<ProviderStatus> {
     return {
       provider: this.id,
       label: this.label,

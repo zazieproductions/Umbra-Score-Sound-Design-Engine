@@ -31,7 +31,7 @@ export class PixabayAssistedProvider implements SoundLibraryProvider {
     offline: false,
   };
 
-  status(): ProviderStatus {
+  async status(): Promise<ProviderStatus> {
     return {
       provider: this.id,
       label: this.label,

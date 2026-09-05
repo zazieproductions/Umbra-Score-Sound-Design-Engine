@@ -38,6 +38,9 @@ from backend.analysis.scenes import detect_cuts, plan_project, plan_scene
 from backend.analysis.spotting import HORROR_PRESETS, build_prompt
 from backend.analysis.video import probe_video, toolchain_status
 from backend.analysis.waveform import analyze_features, generate_peaks
+from backend.env import load_local_env
+from backend.integrations import freesound as freesound_integration
+from backend.integrations.router import router as freesound_router
 from backend.providers.base import GenerationRequest, ProviderError
 from backend.providers.registry import get_registry, route_intent
 from backend.services import model_manager
@@ -50,6 +53,12 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
 )
 log = logging.getLogger("umbra.app")
+
+# Local, git-ignored .env (FREESOUND_API_KEY and friends) is read before any
+# service touches os.environ. Values already set in the process win.
+_env_file = load_local_env()
+if _env_file:
+    log.info("loaded environment file: %s", _env_file)
 
 VERSION = "0.1.0"
 
@@ -68,6 +77,14 @@ async def lifespan(app: FastAPI):
     ready = [s.id for s in registry.statuses() if s.ready]
     log.info("UMBRA backend %s ready — providers online: %s", VERSION, ", ".join(ready) or "none")
     log.info("audio store: %s", store.root)
+    # never log the key itself — only whether one is present
+    if freesound_integration.configured():
+        log.info("freesound integration: key configured (%s)", freesound_integration.key_hint(freesound_integration.api_key()))
+    else:
+        log.info(
+            "freesound integration: NOT configured (set %s in .env to enable retrieval)",
+            freesound_integration.API_KEY_ENV,
+        )
     try:
         yield
     finally:
@@ -75,6 +92,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="UMBRA local ML backend", version=VERSION, lifespan=lifespan)
+
+# External, credential-bearing integrations. The Freesound API key lives in the
+# backend process only — these routes never return it.
+app.include_router(freesound_router)
 
 # The browser talks to the Vite origin and Vite proxies here, so CORS is only
 # a convenience for direct API poking during development.
@@ -106,6 +127,8 @@ async def health() -> Dict[str, Any]:
         "runtime": runtime_summary(),
         "audioStore": app.state.store.stats(),
         "jobs": app.state.jobs.stats(),
+        # configuration only — never a credential value
+        "integrations": {"freesound": {"configured": freesound_integration.configured()}},
     }
 
 

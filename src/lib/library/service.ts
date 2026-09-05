@@ -25,7 +25,6 @@ import { planScene, planSoundEvents, type PlanEventsOptions } from './planner';
 import type { SceneSoundContext, SoundEventCandidate } from './types';
 import type {
   AutoPlacementReport,
-  FreesoundCredentials,
   LibraryAsset,
   LibrarySettings,
   ProvenanceEntry,
@@ -82,11 +81,13 @@ export class RetrievalService {
   readonly pixabay: PixabayAssistedProvider;
   settings: LibrarySettings;
 
-  constructor(
-    private getCreds: () => FreesoundCredentials,
-    settings?: Partial<LibrarySettings>,
-  ) {
-    this.freesound = new FreesoundProvider(getCreds);
+  /**
+   * Freesound needs no credentials here: the API key lives in the backend
+   * process (FREESOUND_API_KEY), and the provider talks to
+   * `/api/integrations/freesound/*`. Nothing secret is stored in the browser.
+   */
+  constructor(settings?: Partial<LibrarySettings>) {
+    this.freesound = new FreesoundProvider();
     this.userLibrary = new UserLibraryProvider();
     this.pixabay = new PixabayAssistedProvider();
     this.settings = { ...DEFAULT_LIBRARY_SETTINGS, ...(settings ?? {}) };
@@ -137,8 +138,8 @@ export class RetrievalService {
       });
     }
 
-    // freesound — only if token ready; otherwise say so honestly
-    const fsStatus = this.freesound.status();
+    // freesound — only if the backend reports it configured; otherwise say so honestly
+    const fsStatus = await this.freesound.status();
     if (fsStatus.ready) {
       try {
         const r = await this.freesound.search(intent, { page });
@@ -260,7 +261,7 @@ export class RetrievalService {
     return { blob: pf.blob, cacheKey: asset.cacheKey };
   }
 
-  /** Original-quality when OAuth2 is configured; otherwise honest error. */
+  /** Original quality when the backend has an OAuth2 token; otherwise honest error. */
   async fetchOriginal(asset: LibraryAsset): Promise<{ blob: Blob; cacheKey: string }> {
     if (!this.freesound.capabilities.download || asset.provider !== 'freesound') {
       throw new Error('Original download is only available for Freesound via OAuth2.');

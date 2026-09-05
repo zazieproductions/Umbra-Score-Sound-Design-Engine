@@ -27,7 +27,8 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | `services/device.py` | Real device detection (CUDA/MPS/CPU via actual probes). Returns `None` when unknown — the UI shows nothing rather than a plausible number. | Anything else |
 | `services/generation_jobs.py` | Async job queue with cancellation. `succeeded` is reachable only with decoded audio on disk. | Routing |
 | `services/model_manager.py` | Checkpoint discovery (size on disk), package probing, Models-view report. Only reports what exists. | Downloads (see `scripts/setup_models.py`) |
-| `tests/` | 57 tests: real-audio contract, capability honesty, payload mapping, routing. No model downloads. | — |
+| `integrations/` | External, credential-bearing APIs. Owns the Freesound client, the status/probe logic and the routes; the credential never leaves this package. | Anything secret-free |
+| `tests/` | 87 tests: real-audio contract, capability honesty, payload mapping, routing, Freesound integration (mocked). No model downloads, no network. | — |
 
 ## API map (`app.py`)
 
@@ -38,6 +39,13 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | Generation | `POST /api/generate` → `GET /api/jobs[/{id}]` → `POST /api/jobs/{id}/cancel` |
 | Audio | `GET /api/audio[/{id}]`, `DELETE /api/audio/{id}`, `POST /api/audio/upload`, `GET /api/audio/{id}/peaks`, `GET /api/audio/{id}/features` |
 | Search / analysis | `POST /api/search` (CLAP, local files only), `POST /api/analysis/cuts`, `POST /api/analysis/video`, `GET /api/analysis/toolchain` |
+| Integrations (Freesound) | `GET /api/integrations/freesound/status`, `POST /api/integrations/freesound/search`, `GET /api/integrations/freesound/sounds/{id}[/similar|/analysis|/preview|/download]` — see `../development/FREESOUND.md` |
+
+The Freesound routes live in `integrations/router.py` and are the **only** way
+the browser reaches Freesound. The API key is read from the environment
+(`FREESOUND_API_KEY`, via a git-ignored `.env`) inside `integrations/` and is
+never returned, logged, or forwarded: responses carry `configured` /
+`connected` and a sha256 fingerprint only.
 
 ## Rules for changing the backend
 
@@ -47,6 +55,9 @@ preprocessing. Run with `python scripts/run_backend.py` (or
    hard-coded wish lists. Unavailable providers declare **no** capabilities.
 3. Every generation result goes through `audio_store` decoding. No path may
    return success without a real file.
-4. New route? Thin handler in `app.py` delegating to a provider/analysis/
-   service module. No inference logic in route functions.
+4. New route? Thin handler delegating to a provider/analysis/service module.
+   No inference logic in route functions.
 5. Device/hardware facts come from `services/device.py` probes only.
+6. **A credential belongs in `integrations/`, never in a response.** Read it
+   from the environment, use it there, and report only whether the integration
+   is configured and connected. Never log or echo a secret value.

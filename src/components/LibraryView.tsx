@@ -507,7 +507,22 @@ function CandidateRow({
 /* -------------------------------------------------------- providers -- */
 
 function ProviderCards({ studio }: { studio: Studio }) {
-  const list = useMemo<ProviderStatus[]>(() => studio.providerStatuses(), [studio]);
+  // Provider status is async now (Freesound readiness is decided by the
+  // backend), so it is mirrored into state. The dependency is the connection
+  // object — NOT `studio` — because `studio` is a fresh object every render
+  // and would loop.
+  const connection = studio.freesoundConnection;
+  const [list, setList] = useState<ProviderStatus[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void studio.providerStatuses().then((s) => {
+      if (alive) setList(s);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh when the backend connection state changes
+  }, [connection]);
 
   const caps = (s: ProviderStatus) =>
     [
@@ -529,7 +544,8 @@ function ProviderCards({ studio }: { studio: Studio }) {
               <span className="text-[11.5px] font-medium text-bone">{s.label}</span>
               {s.provider === 'freesound' && (
                 <span className="chip ml-auto border-white/10 text-[8.5px]">
-                  {studio.creds.apiToken ? <Lock size={8} /> : <X size={8} />} token {studio.creds.apiToken ? 'set' : 'missing'}
+                  {studio.freesoundConnection.configured ? <Lock size={8} /> : <X size={8} />} key{' '}
+                  {studio.freesoundConnection.configured ? 'on server' : 'missing'}
                 </span>
               )}
             </div>

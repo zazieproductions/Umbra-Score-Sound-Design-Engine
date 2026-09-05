@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from backend.integrations import freesound as fs  # noqa: E402
 from backend.services import device, model_manager  # noqa: E402
 
 OK = "\u2713"
@@ -58,6 +59,29 @@ def _section(title: str) -> None:
     print("=" * 62)
     print(title)
     print("=" * 62)
+
+
+def fs_env_file() -> Path | None:
+    """The env file the backend reads (FREESOUND_API_KEY and friends)."""
+    from backend.env import env_file_path
+
+    path = env_file_path()
+    return path if path.exists() else None
+
+
+def git_tracks(path: "Path") -> bool:
+    """True when `path` is NOT ignored by Git — i.e. a credential leak risk."""
+    try:
+        out = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)],
+            cwd=str(ROOT),
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    # exit 0 = ignored (good), 1 = not ignored (danger), 128 = not a repo
+    return out.returncode == 1
 
 
 def collect() -> dict:
@@ -98,7 +122,18 @@ def collect() -> dict:
         except Exception:
             ffmpeg_version = None
 
+    # Configuration only — the key value is never returned, printed or logged.
+    key = fs.api_key()
+    env_file = fs_env_file()
     return {
+        "freesound": {
+            "configured": bool(key),
+            "keyHint": fs.key_hint(key),
+            "apiBase": fs.api_base(),
+            "oauth": bool(fs.oauth_token()),
+            "envFile": str(env_file) if env_file else None,
+            "envFileTracked": git_tracks(env_file) if env_file else False,
+        },
         "python": {
             "version": f"{py.major}.{py.minor}.{py.micro}",
             "supported": (3, 11) <= (py.major, py.minor) < (3, 13),
@@ -160,6 +195,23 @@ def render(data: dict) -> int:
         for note in d.get("notes", []):
             print(f"      {note}")
 
+    _section("Freesound integration (key stays on the server)")
+    fsx = data["freesound"]
+    if fsx["configured"]:
+        print(f"  {OK} FREESOUND_API_KEY set ({fsx['keyHint']}) — backend will authenticate")
+        print(f"      original-quality download: {'OAuth2 token present' if fsx['oauth'] else 'not configured (previews only)'}")
+    else:
+        print(f"  {MISSING} FREESOUND_API_KEY not set — library retrieval will report \"not configured\"")
+        print("      cp .env.example .env   # then set FREESOUND_API_KEY=<your Freesound client secret>")
+    if fsx["envFile"]:
+        leak = fsx["envFileTracked"]
+        print(f"  {WARN if leak else OK} env file: {fsx['envFile']}" + ("  \u2190 NOT git-ignored!" if leak else "  (git-ignored)"))
+        if leak:
+            print("      Add .env to .gitignore and rotate the key before pushing anything.")
+    else:
+        print(f"  {MISSING} no env file found (expected: {fsx['envFile'] or '.env'})")
+    print(f"  {OK if fsx['apiBase'] else MISSING} API base: {fsx['apiBase']}")
+
     _section("External tools")
     ff = data["tools"]["ffmpeg"]
     if ff["path"]:
@@ -192,6 +244,12 @@ def render(data: dict) -> int:
     else:
         print("  Environment looks ready. Start the backend:")
         print("    python scripts/run_backend.py")
+
+    if not data["freesound"]["configured"]:
+        print()
+        print("  Freesound: set FREESOUND_API_KEY in .env, restart the backend, then check")
+        print("    curl -s http://127.0.0.1:8000/api/integrations/freesound/status")
+        print("  (see docs/development/FREESOUND.md)")
 
     if rt["preferredDevice"] == "cpu" and rt["torch"]:
         print()
