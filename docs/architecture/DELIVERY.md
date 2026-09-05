@@ -76,8 +76,11 @@ pass (REF included) shares these decisions:
   pass renders its IR — is accepted and recorded in ADR-0005.
 - **Ducking automation is data, not state.** `sceneDuckEvents` (shared with
   `render.ts` so monitor and export cannot drift) is recomputed per pass over
-  the same event list; a music stem ducks against the full hit list exactly
-  like the mix does, so subtraction stays valid.
+  the same event list. Sidechain ducks fired *by procedural voices* at event
+  time ride along identically: every pass schedules every voice, muting
+  foreign ones as sample-zero ghosts, so the duck envelope is the same global
+  in master, reference and every stem, and Σ nulls exactly. A music stem
+  ducks against the full hit list exactly like the mix does.
 - **The sub bus is single-owner.** `SUB_LFE` (when enabled) and `PROCEDURAL`
   take custody of sub-bus material (`subOut=false` on other consolidated
   passes); the owner feeds `subFull + verb` exactly as the master graph does.

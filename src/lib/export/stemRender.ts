@@ -19,7 +19,7 @@
 
 import { buildMaster, type MasterParams } from '../dsp';
 import { loadClipBuffer, scheduleClip } from '../clips';
-import { finalizeMaster, measureLufs, schedule, TARGET_LUFS } from '../render';
+import { finalizeMaster, measureLufs, schedule, TARGET_LUFS, type ScheduleSelection } from '../render';
 import { sampleToSec } from './clock';
 import type { DeliveryPlan, PassLayerRef, StemPassPlan } from './stemPlan';
 
@@ -71,11 +71,36 @@ export async function renderPassWebAudio(
   for (const l of pass.layers) layerFlags.set(layerKey(l.sceneId, l.layerId), l);
   const pictureSeconds = plan.pictureEnd;
 
+  // Membership (ADR-0005): a pass HEARS its own layers. Foreign layers are
+  // still SCHEDULED, silenced as ghosts — because procedural voices carry
+  // sidechain automation (hit→music ducking fired from within each voice's
+  // event loop). Scheduling every voice in every pass keeps that automation
+  // envelope identical across the master bounce, the mix reference and all
+  // stems, so Σ stems nulls against the reference exactly and music clips
+  // pump in every bus just as they do in the session. Ghosts contribute
+  // sample-exact zeros (all outputs disconnected, sends/sub-feed zeroed).
+  const silenceVoice = (voice: Parameters<NonNullable<ScheduleSelection['afterVoice']>>[2]) => {
+    const ch = voice.ch;
+    for (const dest of [ch.m.musicSum, ch.m.hitSum, ch.m.subBus]) {
+      try {
+        ch.fader.disconnect(dest);
+      } catch {
+        /* that kind never connected this bus */
+      }
+    }
+    for (const s of [ch.sendRoom, ch.sendHall, ch.sendCath, ch.subFeed]) {
+      s.gain.cancelScheduledValues(0);
+      s.gain.setValueAtTime(0, 0);
+    }
+  };
+
   schedule(ctx, master, plan.scenes, pictureSeconds, {
-    includeLayer: (scene, layer) => layerFlags.has(layerKey(scene.id, layer.id)),
     afterVoice: (scene, layer, voice) => {
       const ref = layerFlags.get(layerKey(scene.id, layer.id));
-      if (!ref) return;
+      if (!ref) {
+        silenceVoice(voice);
+        return;
+      }
       if (!ref.dry) {
         // keep the voice running (sub-feed must stay alive) but mute its
         // dry path into the summed buses
