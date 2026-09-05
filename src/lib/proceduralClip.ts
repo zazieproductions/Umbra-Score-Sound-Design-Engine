@@ -124,8 +124,9 @@ export async function renderProceduralClip(
     glue: 0,
     drive: 0,
     tilt: 0,
-    width: 0,
+    width: 1, // keep the voice's own stereo image; do not mono-collapse
     exciter: 0,
+    air: 0,
     roomMix: 0.06,
     hallMix: 0.1,
     cathMix: 0.04,
@@ -147,8 +148,8 @@ export async function renderProceduralClip(
 
   // one-shot classes need explicit triggers to make any sound at all
   if (voice.fire) {
-    const every = voice.interval ? Math.max(0.35, voice.interval(layer, tension)) : duration;
-    for (let t = 0.05; t < duration - 0.05; t += every) {
+    const every = voice.interval ? Math.max(0.35, voice.interval(layer, tension, 0.05)) : duration;
+    for (let t = 0.05; t < duration - 0.05; t += voice.interval ? Math.max(0.35, voice.interval(layer, tension, t)) : every) {
       voice.fire(t, 0.55 + tension * 0.4, layer);
     }
   }

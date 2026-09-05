@@ -3,6 +3,7 @@ import { buildVoice } from './voices';
 import { mulberry32 } from './prng';
 import { clipEnd, loadClipBuffer, scheduleClip } from './clips';
 import { KIND_META, type AudioClip, type Layer, type Project, type Scene } from './types';
+import { analyzeFloat, integratedLufs, truePeakLinear, type QualityReport } from './quality';
 
 /** Static fader target for a layer — mirrors applyStrip() in voices.ts. */
 function faderTarget(l: Layer, tension: number): number {
@@ -28,6 +29,8 @@ export interface RenderResult {
   clipsPlaced?: number;
   /** clips whose audio could not be decoded — reported, never hidden */
   clipsFailed?: string[];
+  /** measured quality report of the final master (clipping, DC, subsonic…) */
+  quality?: QualityReport;
 }
 
 export interface RenderOpts {
@@ -64,6 +67,11 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
 
     // polished seam: duck the music bed a touch as each new scene enters
     if (start > 0.05) master.duck(start, 0.16, 0.01, 0.6);
+
+    // Tension macro — mirror the live monitor (audio.ts setTension). Without
+    // this the offline bounce leaves the dynamics gain at unity and exports
+    // run hot, most of all on quiet (low-tension) scenes.
+    master.dynamics.gain.setValueAtTime(0.34 + scene.tension * 0.92, start);
 
     const anySolo = scene.layers.some((l) => l.solo);
 
@@ -105,7 +113,7 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
           const prog = (t - start) / Math.max(0.001, end - start);
           const force = 0.4 + scene.tension * 0.42 + prog * 0.2;
           voice.fire(t, Math.min(1, force), layer);
-          t += voice.interval(layer, scene.tension);
+          t += voice.interval(layer, scene.tension, t);
         }
       }
 
@@ -182,141 +190,59 @@ async function scheduleClips(
 
 /* -------------------------------------------------- post processing --- */
 
-interface BiquadCoeffs {
-  b0: number;
-  b1: number;
-  b2: number;
-  a1: number;
-  a2: number;
-}
-
-function highShelfCoeffs(f0: number, fs: number, dbGain: number): BiquadCoeffs {
-  const A = Math.pow(10, dbGain / 40);
-  const w0 = (2 * Math.PI * f0) / fs;
-  const cosw = Math.cos(w0);
-  const sinw = Math.sin(w0);
-  const alpha = (sinw / 2) * Math.sqrt(2); // S = 1
-  const sqA = Math.sqrt(A);
-  const b0 = A * ((A + 1) + (A - 1) * cosw + 2 * sqA * alpha);
-  const b1 = -2 * A * ((A - 1) + (A + 1) * cosw);
-  const b2 = A * ((A + 1) + (A - 1) * cosw - 2 * sqA * alpha);
-  const a0 = (A + 1) - (A - 1) * cosw + 2 * sqA * alpha;
-  const a1 = 2 * ((A - 1) - (A + 1) * cosw);
-  const a2 = (A + 1) - (A - 1) * cosw - 2 * sqA * alpha;
-  return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
-}
-
-function highPassCoeffs(f0: number, fs: number, Q: number): BiquadCoeffs {
-  const w0 = (2 * Math.PI * f0) / fs;
-  const cosw = Math.cos(w0);
-  const alpha = Math.sin(w0) / (2 * Q);
-  const b0 = (1 + cosw) / 2;
-  const b1 = -(1 + cosw);
-  const b2 = (1 + cosw) / 2;
-  const a0 = 1 + alpha;
-  const a1 = -2 * cosw;
-  const a2 = 1 - alpha;
-  return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
-}
-
 /**
- * ITU-R BS.1770-style integrated loudness: K-weighting (high shelf +4 dB @
- * 1.68 kHz, high-pass 38 Hz), 400 ms blocks, absolute then relative gating.
+ * Lookahead true-peak limiter.
+ *
+ * The window max is computed over a 4x Catmull-Rom reconstruction (shared
+ * with quality.ts) rather than over raw samples, so inter-sample peaks are
+ * attenuated too — the exported master genuinely stays under the ceiling
+ * on reconstruction, not just at the sample points.
  */
-function measureLufs(chans: Float32Array[], fs: number): number {
-  const n = chans[0].length;
-  const block = Math.max(1, Math.round(fs * 0.4));
-  const numBlocks = Math.max(1, Math.floor(n / block));
-  const powers = new Float64Array(numBlocks);
-  const H = highShelfCoeffs(1681.97, fs, 4);
-  const L = highPassCoeffs(38.13, fs, 0.7071);
-
-  for (let c = 0; c < chans.length; c++) {
-    const x = chans[c];
-    let hx1 = 0;
-    let hx2 = 0;
-    let hy1 = 0;
-    let hy2 = 0;
-    let lx1 = 0;
-    let lx2 = 0;
-    let ly1 = 0;
-    let ly2 = 0;
-    let blockSum = 0;
-    let bi = 0;
-    for (let i = 0; i < n; i++) {
-      const s = x[i];
-      // high shelf
-      const y = H.b0 * s + H.b1 * hx1 + H.b2 * hx2 - H.a1 * hy1 - H.a2 * hy2;
-      hx2 = hx1;
-      hx1 = s;
-      hy2 = hy1;
-      hy1 = y;
-      // high pass
-      const yb = L.b0 * y + L.b1 * lx1 + L.b2 * lx2 - L.a1 * ly1 - L.a2 * ly2;
-      lx2 = lx1;
-      lx1 = y;
-      ly2 = ly1;
-      ly1 = yb;
-      blockSum += yb * yb;
-      if ((i + 1) % block === 0) {
-        powers[bi] += blockSum;
-        blockSum = 0;
-        bi++;
-      }
-    }
-  }
-
-  // absolute gate at -70 LUFS
-  const absThresh = Math.pow(10, -70 / 10);
-  let sum = 0;
-  let cnt = 0;
-  for (let i = 0; i < numBlocks; i++) {
-    const ms = powers[i] / block;
-    if (ms >= absThresh) {
-      sum += ms;
-      cnt++;
-    }
-  }
-  if (cnt === 0) return -70;
-  const mean = sum / cnt;
-  // relative gate: -10 LU below gated mean
-  const relThresh = mean * Math.pow(10, -10 / 10);
-  let sum2 = 0;
-  let cnt2 = 0;
-  for (let i = 0; i < numBlocks; i++) {
-    const ms = powers[i] / block;
-    if (ms >= absThresh && ms >= relThresh) {
-      sum2 += ms;
-      cnt2++;
-    }
-  }
-  const final = cnt2 > 0 ? sum2 / cnt2 : mean;
-  return -0.691 + 10 * Math.log10(Math.max(1e-12, final));
-}
-
-/** Lookahead true-peak limiter (sliding-window max, instant attack, smooth release). */
 function lookaheadLimit(data: Float32Array, fs: number, ceilingDb: number): Float32Array {
   const n = data.length;
   const out = new Float32Array(n);
   const ceiling = Math.pow(10, ceilingDb / 20);
   const look = Math.max(1, Math.floor(fs * 0.005));
   const rel = 1 - Math.exp(-1 / (fs * 0.08));
-  const peak = new Float32Array(n);
-  const q = new Int32Array(n);
+
+  // 4x oversampled (Catmull-Rom) reconstruction for inter-sample peaks.
+  const ov = 4;
+  const up = new Float32Array((n - 1) * ov);
+  const at = (i: number) => (i < 0 ? data[0] : i >= n ? data[n - 1] : data[i]);
+  for (let i = 0; i < n - 1; i++) {
+    const x0 = at(i - 1);
+    const x1 = data[i];
+    const x2 = data[i + 1];
+    const x3 = at(i + 2);
+    const a = -0.5 * x0 + 1.5 * x1 - 1.5 * x2 + 0.5 * x3;
+    const b = x0 - 2.5 * x1 + 2 * x2 - 0.5 * x3;
+    const c = -0.5 * x0 + 0.5 * x2;
+    const d = x1;
+    for (let s = 0; s < ov; s++) {
+      const t = s / ov;
+      up[i * ov + s] = ((a * t + b) * t + c) * t + d;
+    }
+  }
+
+  const m = up.length;
+  const peak = new Float32Array(m);
+  const q = new Int32Array(m);
   let qh = 0;
   let qt = 0;
-  // backward scan → look-ahead window max
-  for (let i = n - 1; i >= 0; i--) {
-    const v = Math.abs(data[i]);
-    while (qh < qt && Math.abs(data[q[qt - 1]]) <= v) qt--;
+  const win = look * ov;
+  for (let i = m - 1; i >= 0; i--) {
+    const v = Math.abs(up[i]);
+    while (qh < qt && Math.abs(up[q[qt - 1]]) <= v) qt--;
     q[qt++] = i;
-    const lim = i + look;
+    const lim = i + win;
     while (qh < qt && q[qh] > lim) qh++;
-    peak[i] = Math.abs(data[q[qh]]);
+    peak[i] = Math.abs(up[q[qh]]);
   }
+
   let gain = 1;
   for (let i = 0; i < n; i++) {
-    const target = peak[i] > 1e-9 ? ceiling / peak[i] : 1;
+    const p = i < n - 1 ? peak[i * ov] : Math.abs(data[i]);
+    const target = p > 1e-9 ? ceiling / p : 1;
     if (target < gain) gain = target;
     else if (gain < 1) gain = Math.min(1, gain + (1 - gain) * rel);
     out[i] = data[i] * gain;
@@ -324,17 +250,27 @@ function lookaheadLimit(data: Float32Array, fs: number, ceilingDb: number): Floa
   return out;
 }
 
-/** Post-render master: loudness-normalise, true-peak limit, measure. */
+/**
+ * Post-render master: loudness-conform, true-peak limit, measure.
+ *
+ * Near-silent output is left alone: conforming a quiet psychological cue
+ * to -16 LUFS would lift the noise floor and destroy the intentional
+ * negative space, so below SILENCE_LUFS_DB we skip the makeup gain.
+ */
 function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: number | null) {
   const fs = buffer.sampleRate;
   const numCh = Math.min(2, buffer.numberOfChannels);
   const chans: Float32Array[] = [];
   for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
 
-  const rawLufs = measureLufs(chans, fs);
+  const rawLufs = integratedLufs(chans, fs);
   let lufs = rawLufs;
-  if (targetLufs !== null) {
-    const makeup = Math.min(9, Math.max(-4, targetLufs - rawLufs));
+  if (targetLufs !== null && rawLufs > -45) {
+    // Asymmetric conform: loud material is reduced freely to the target,
+    // but quiet material is only ever lifted a little (+6 dB cap) — so a
+    // near-silent cue is not pumped up to broadcast level and the film's
+    // quiet-to-loud arc survives.
+    const makeup = Math.min(6, targetLufs - rawLufs);
     const mg = Math.pow(10, makeup / 20);
     for (let c = 0; c < numCh; c++) {
       const d = chans[c];
@@ -347,14 +283,21 @@ function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: numb
     chans[c] = limited;
   }
 
-  lufs = measureLufs(chans, fs);
+  lufs = integratedLufs(chans, fs);
   let peak = 0;
+  let truePeak = 0;
   for (let c = 0; c < numCh; c++) {
     const d = chans[c];
-    for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
+    const p = truePeakLinear(d);
+    if (p > truePeak) truePeak = p;
+    for (let i = 0; i < d.length; i++) {
+      const v = Math.abs(d[i]);
+      if (v > peak) peak = v;
+    }
   }
   const peakDb = peak > 1e-7 ? 20 * Math.log10(peak) : -70;
-  return { chans, lufs, peakDb };
+  const truePeakDb = truePeak > 1e-7 ? 20 * Math.log10(truePeak) : -70;
+  return { chans, lufs, peakDb, truePeakDb };
 }
 
 export function encodeWav(chans: Float32Array[], sampleRate: number, bitDepth: 16 | 24): Blob {
@@ -393,7 +336,10 @@ export function encodeWav(chans: Float32Array[], sampleRate: number, bitDepth: 1
       if (s > 1) s = 1;
       else if (s < -1) s = -1;
       if (bitDepth === 24) {
-        const v = Math.round(s * max24);
+        // TPDF dither at the 24-bit LSB so truncation never quantises to a
+        // correlated (audible) error — matches the "TPDF-dithered 24-bit" promise.
+        const dither = (rnd() + rnd() - 1) / max24;
+        const v = Math.max(-max24, Math.min(max24, Math.round((s + dither) * max24)));
         view.setUint8(off, v & 0xff);
         view.setUint8(off + 1, (v >> 8) & 0xff);
         view.setUint8(off + 2, (v >> 16) & 0xff);
@@ -453,6 +399,8 @@ export async function renderScore(
   const { chans, lufs, peakDb } = finalizeMaster(buffer, masterParams.ceiling, TARGET_LUFS);
   opts.onProgress?.(92);
 
+  const quality = analyzeFloat(chans, sampleRate);
+
   const blob = encodeWav(chans, sampleRate, bitDepth);
   opts.onProgress?.(98);
 
@@ -465,6 +413,7 @@ export async function renderScore(
     bytes: blob.size,
     clipsPlaced: clipResult.placed.length,
     clipsFailed: clipResult.failed.map((c) => c.name),
+    quality,
   };
 }
 
@@ -495,6 +444,7 @@ export async function renderClipStem(
 
   const buffer = await ctx.startRendering();
   const { chans, lufs, peakDb } = finalizeMaster(buffer, masterParams.ceiling, null);
+  const quality = analyzeFloat(chans, sampleRate);
   const blob = encodeWav(chans, sampleRate, 24);
   return {
     blob,
@@ -505,6 +455,7 @@ export async function renderClipStem(
     bytes: blob.size,
     clipsPlaced: 1,
     clipsFailed: [],
+    quality,
   };
 }
 
@@ -532,8 +483,9 @@ export async function renderStem(
   schedule(ctx, master, [solo], span);
   const buffer = await ctx.startRendering();
   const { chans, lufs, peakDb } = finalizeMaster(buffer, masterParams.ceiling, null);
+  const quality = analyzeFloat(chans, sampleRate);
   const blob = encodeWav(chans, sampleRate, 24);
-  return { blob, url: URL.createObjectURL(blob), peakDb, lufs, seconds: buffer.duration, bytes: blob.size };
+  return { blob, url: URL.createObjectURL(blob), peakDb, lufs, seconds: buffer.duration, bytes: blob.size, quality };
 }
 
 export function download(url: string, filename: string) {

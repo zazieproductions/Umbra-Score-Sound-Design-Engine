@@ -295,6 +295,33 @@ def test_prompt_marks_instrumental_and_underscore():
     assert "underscore" in plan.prompt or "cinematic cue" in plan.prompt
 
 
+def test_prompt_adds_sonic_fidelity_direction_by_default():
+    plan = build_prompt("low cluster")
+    assert "natural room acoustics" in plan.prompt
+    assert "wide dynamic range" in plan.prompt
+
+
+def test_prompt_suppresses_fidelity_direction_when_degradation_requested():
+    plan = build_prompt("corroded tape drone")
+    assert "natural room acoustics" not in plan.prompt
+
+
+def test_prompt_carries_quality_negatives():
+    plan = build_prompt("slow horror drone")
+    neg = plan.negative_prompt.lower()
+    assert "clipping" in neg
+    assert "muddy low end" in neg
+    assert "aliasing artifacts" in neg
+
+
+def test_prompt_expands_spatial_vocabulary():
+    plan = build_prompt("liminal corridor, acousmatic whisper, microtonal beating")
+    p = plan.prompt
+    assert "liminal space" in p
+    assert "unseen source" in p
+    assert "beating" in p or "microtonal" in p
+
+
 # -------------------------------------------------------------------- planner
 
 

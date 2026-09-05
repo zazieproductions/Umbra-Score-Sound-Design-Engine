@@ -259,6 +259,19 @@ export default function RightPanel({ studio }: { studio: Studio }) {
                       {j.bytes ? ` · ${bytes(j.bytes)}` : ''}
                       {j.lufs !== undefined ? ` · ${j.lufs.toFixed(1)} LUFS` : ''}
                     </p>
+                    {j.quality && (
+                      <p
+                        className={`tnum mt-1 text-[9.5px] ${
+                          j.quality.verdict === 'pass'
+                            ? 'text-brine'
+                            : j.quality.verdict === 'warn'
+                              ? 'text-ember'
+                              : 'text-tan'
+                        }`}
+                      >
+                        {j.quality.verdict.toUpperCase()} · {j.quality.summary}
+                      </p>
+                    )}
                     {j.state === 'complete' && (
                       <button className="btn btn-primary mt-1.5 w-full px-2 py-1 text-[10.5px]" onClick={() => studio.downloadJob(j)}>
                         <Download size={11} /> Download WAV

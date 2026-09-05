@@ -33,6 +33,15 @@ BASE_NEGATIVES = [
     "vocal hook",
     "cheerful",
     "upbeat",
+    # quality gates: dread must stay pristine, not translate into damage
+    "clipping",
+    "digital distortion",
+    "overcompressed mix",
+    "muddy low end",
+    "harsh resonant peaks",
+    "aliasing artifacts",
+    "low-bitrate artifacts",
+    "loudness-war loudness",
 ]
 
 # Extra negatives switched on by explicit user direction.
@@ -46,7 +55,9 @@ CONDITIONAL_NEGATIVES = {
     "no synth": ["synthesizer", "electronic pads"],
 }
 
-# Composer shorthand -> descriptive language the model understands.
+# Composer shorthand -> descriptive language the model understands. Each
+# expansion states the *acoustic behaviour* — texture, dynamics, perspective,
+# space — never a vague vibe word like "epic scary cinematic".
 INTENT_EXPANSIONS = [
     (r"\bdread\b", "slow-building dread, unresolved tension"),
     (r"\bunstable\b", "microtonal instability, wavering pitch"),
@@ -59,6 +70,20 @@ INTENT_EXPANSIONS = [
     (r"\britual\b", "ritual repetition, ceremonial pacing"),
     (r"\bprepared piano\b", "prepared piano, muted damped strings, object-on-string"),
     (r"\breversed choir\b", "reversed choral texture, backwards vocal swell"),
+    # liminal / spatial / acousmatic vocabulary
+    (r"\bliminal\b", "liminal space, empty corridor acoustics, distant reflective surfaces"),
+    (r"\bacousmatic\b", "acousmatic sound, unseen source, sound divorced from visible origin"),
+    (r"\bmicrotonal\b", "microtonal detuning, beating between close frequencies"),
+    (r"\bbeating\b", "slow amplitude beating between two detuned fundamentals"),
+    (r"\binharmonic\b", "inharmonic partials, non-octave overtones, metallic resonance"),
+    (r"\bnegative space\b", "negative space, deliberate silence between sparse events"),
+    (r"\bclose-?mic\b|proximity", "close-mic proximity effect, intimate foreground detail"),
+    (r"\bdistant\b|far-?off\b", "distant perspective, far-off reflected detail, deep space"),
+    (r"\bdoppler\b", "doppler shift, moving source passing the listener"),
+    (r"\bindustrial\b", "industrial machinery, metallic resonance, machine-room acoustics"),
+    (r"\borganic\b", "organic texture, breathing, flesh-and-room proximity"),
+    (r"\bair\b|wind|breeze", "air movement, low wind through an enclosed space"),
+    (r"\bsilence\b|stillness", "long silences, near-silent passages, held breath"),
 ]
 
 # Register hints derived from tempo and density.
@@ -68,6 +93,20 @@ DENSITY_LANGUAGE = {
     "medium": "restrained layering, three or four elements",
     "high": "dense layered texture",
 }
+
+# Default sonic-direction: specific acoustic behaviour and space, applied so a
+# "dark scene" cue stays clean and detailed instead of defaulting to a loud,
+# distorted trailer wall. Switched off when the composer explicitly asks for
+# degradation, so "corroded" still means corroded.
+SONIC_DIRECTION = (
+    "pristine recording quality, natural room acoustics, clear spatial depth, "
+    "controlled low end, detailed transients, wide dynamic range, no harshness"
+)
+
+DEGRADATION_INTENT = re.compile(
+    r"\b(corroded|corrosion|tape|lo-?fi|degrad|distort|saturat|overdriv|crush)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -166,15 +205,20 @@ def build_prompt(
         parts.append(DENSITY_LANGUAGE[density])
 
     if dread is not None and dread >= 0.6:
-        parts.append("pervasive dread, oppressive atmosphere")
+        parts.append("pervasive dread, oppressive atmosphere, pianissimo dynamics with space between gestures")
     if tension is not None and tension <= 0.35:
-        parts.append("held back, withheld tension, nothing releases")
+        parts.append("held back, withheld tension, nothing releases, near-silent passages")
     elif tension is not None and tension >= 0.75:
-        parts.append("acute tension, on the edge of breaking")
+        parts.append("acute tension, on the edge of breaking, sharp foreground detail")
 
     if bpm is not None and bpm <= 60:
         parts.append(f"very slow {bpm} BPM pacing, long note values")
         notes.append("Low-BPM phrasing hint added")
+
+    # keep dread clean and detailed unless the composer asks for damage
+    if not DEGRADATION_INTENT.search(intent):
+        parts.append(SONIC_DIRECTION)
+        notes.append("Sonic-direction fidelity hint added")
 
     negatives = list(BASE_NEGATIVES)
     negatives.extend(_detect_exclusions(intent))
@@ -209,41 +253,81 @@ HORROR_PRESETS: List[Dict[str, str]] = [
     {
         "id": "bowed-unstable",
         "label": "Slow unstable bowed texture",
-        "prompt": "slow unstable bowed string texture, wavering intonation, no vibrato",
+        "prompt": "slow unstable bowed string texture, wavering intonation, no vibrato, close-mic bow noise, wide stereo field",
     },
     {
         "id": "low-cluster",
         "label": "Low-register cluster, no resolution",
-        "prompt": "low-register semitone cluster with no melodic resolution, sustained",
+        "prompt": "low-register semitone cluster with no melodic resolution, sustained, felt sub weight under the cluster",
     },
     {
         "id": "barely-tonal",
         "label": "Barely tonal sustained score",
-        "prompt": "barely tonal sustained score, ambiguous key centre, slow drift",
+        "prompt": "barely tonal sustained score, ambiguous key centre, slow drift, distant cathedral reflection",
     },
     {
         "id": "prepared-piano",
         "label": "Sparse prepared-piano gestures",
-        "prompt": "sparse prepared-piano gestures, damped strings, long silences between notes",
+        "prompt": "sparse prepared-piano gestures, damped strings, object-on-string detail, long silences between notes, dry room",
     },
     {
         "id": "string-harmonics",
         "label": "Dissonant string harmonics",
-        "prompt": "dissonant string harmonics, sul ponticello, glassy and thin",
+        "prompt": "dissonant string harmonics, sul ponticello, glassy and thin, airy high partials, fragile dynamics",
     },
     {
         "id": "ritual-percussion",
         "label": "Ritual percussion, empty spaces",
-        "prompt": "ritual percussion with long empty spaces, distant hand drums, no groove",
+        "prompt": "ritual percussion with long empty spaces, distant hand drums, no groove, cavernous echo",
     },
     {
         "id": "spectral-smear",
         "label": "Shoegaze-like spectral smear",
-        "prompt": "shoegaze-like spectral smear without drums, washed guitar drone, buried harmony",
+        "prompt": "shoegaze-like spectral smear without drums, washed guitar drone, buried harmony, slow filter movement",
     },
     {
         "id": "corroded-drone",
         "label": "Corroded drone bed",
-        "prompt": "corroded drone bed, tape degradation, slowly detuning sustained tone",
+        "prompt": "corroded drone bed, tape degradation, slowly detuning sustained tone, worn-out hiss and dropouts",
+    },
+    {
+        "id": "liminal-corridor",
+        "label": "Liminal corridor ambience",
+        "prompt": "liminal corridor ambience, empty reflective surfaces, distant HVAC tone, footsteps in negative space",
+    },
+    {
+        "id": "acousmatic-whisper",
+        "label": "Acousmatic close-mic whisper",
+        "prompt": "acousmatic close-mic whisper texture, unseen source, breath and fabric detail, dead-quiet room",
+    },
+    {
+        "id": "inharmonic-resonance",
+        "label": "Inharmonic metallic resonance",
+        "prompt": "inharmonic metallic resonance, non-octave partials, slowly beating overtones, long natural decay",
+    },
+    {
+        "id": "microtonal-beating",
+        "label": "Microtonal beating drones",
+        "prompt": "two detuned sustained fundamentals, slow amplitude beating, microtonal drift, felt sub pressure",
+    },
+    {
+        "id": "sub-pressure",
+        "label": "Clean low-register sub pressure",
+        "prompt": "low-register sub pressure, 30-50 Hz felt weight, barely audible, controlled and clean, no distortion",
+    },
+    {
+        "id": "industrial-organism",
+        "label": "Industrial machine room",
+        "prompt": "industrial machinery room, metallic scrapes and resonant tanks, organic breathing underneath, deep space",
+    },
+    {
+        "id": "negative-space",
+        "label": "Near-silent negative space",
+        "prompt": "near-silent negative space, single distant event, long reverberant decay, extreme dynamic contrast",
+    },
+    {
+        "id": "spectral-movement",
+        "label": "Spectral movement",
+        "prompt": "spectral movement, sound mass slowly shifting register, inharmonic smear, no tonal centre",
     },
 ]

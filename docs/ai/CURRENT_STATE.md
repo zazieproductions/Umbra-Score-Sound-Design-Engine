@@ -29,7 +29,7 @@ adapters, scene+spotting planner, video/waveform analysis, audio store
 
 | Provider | Implementation | Runtime status |
 | --- | --- | --- |
-| umbra-procedural | 17 Web Audio voices, offline bounce to WAV | RUNTIME VERIFIED (browser-side, deterministic) |
+| umbra-procedural | 17 Web Audio voices, offline bounce to WAV | RUNTIME VERIFIED (browser-side); per-stem/per-scene renders deterministic; full-mix may vary at 1-LSB level (native engine float reduction) |
 | ace-step | Adapter + prompt plan + job flow plumbed | NOT runtime-verified here — needs weights + torch + ffmpeg on target hardware |
 | stable-audio | Validation adapter | NOT runtime-verified here |
 | mmaudio | Adapter, real-or-UNAVAILABLE | NOT runtime-verified here |
@@ -44,9 +44,25 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 25 (19 retrieval acceptance + 6 architecture invariants) (`npm test`)
-- Backend: 62 (57 contract + 5 invariants) (`pytest backend/tests -q`), no downloads
+- Frontend: 49 (`npm test`) — 19 retrieval acceptance + 6 architecture invariants
+  + 20 quality-measurement units + 4 rendered audio-QA gates.
+  The 4 rendered gates exercise the real DSP through the headless Web Audio
+  engine (`node-web-audio-api`); they skip (not fail) when that native addon
+  cannot load (no ALSA). `LD_LIBRARY_PATH` to an ALSA stub runs all 49.
+- Backend: 66 (`pytest backend/tests -q`), no downloads
 - `tsc -b` clean · `eslint` clean · `vite build` clean
+
+## Audio quality gates
+
+`src/lib/quality.ts` is the single source of truth for measurable export QA:
+sample/true peak, RMS, crest factor, DC offset, subsonic (≤20 Hz) ratio,
+clipping, intersample clipping, non-finite samples, integrated LUFS, stereo
+correlation, silence and output stability, with a `pass|warn|fail` verdict.
+`render.ts` measures every bounce and `useStudio.ts` surfaces the verdict in
+the render queue and log. The DSP core fixes landed this pass: a
+silence-through full-wave rectifier (was injecting a full-scale DC step that
+thumped through the sub-bus highpass at render start) and band-limited
+oscillators across all pitched/transient voices (no fold-back aliasing).
 
 ## Known limitations
 
@@ -84,8 +100,9 @@ alignment, export loudness conformance tests, docs drift checks.
 
 ## Last verified
 
-- **Date:** 2026-09-05 · **main commit:** `b0c5065` · **branch:**
-  `arena/01a06ff1-umbra-score-sound-design-engin`
-- Frontend: `npm run verify` green (typecheck + eslint + 19 tests) · `npm run build` green
-- Backend: `pytest backend/tests` 57 passed, no downloads
+- **Date:** 2026-09-05 · **base commit:** `0d78a15` · **branch:**
+  `arena/01a072fd-umbra-score-sound-design-engin`
+- Frontend: `npm run verify` green (typecheck + eslint + 45 pass / 4 skip) ·
+  `npm run build` green · rendered QA 49/49 with the headless engine + ALSA stub
+- Backend: `pytest backend/tests` 66 passed, no downloads
 - Runtime provider verification: none in this environment (see table above)

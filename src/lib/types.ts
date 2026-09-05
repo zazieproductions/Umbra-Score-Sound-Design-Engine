@@ -211,6 +211,8 @@ export interface RenderJob {
   filename?: string;
   peak?: number;
   lufs?: number;
+  /** measured quality verdict of the finished master (see src/lib/quality.ts) */
+  quality?: { verdict: 'pass' | 'warn' | 'fail'; summary: string };
 }
 
 export interface KindMeta {
