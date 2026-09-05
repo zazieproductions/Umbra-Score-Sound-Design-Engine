@@ -96,7 +96,7 @@ function GeneratorPicker({
 export default function ScoringPanel({ studio }: { studio: Studio }) {
   const { generation, project, activeScene, range, time } = studio;
   const [provider, setProvider] = useState<ProviderId>('ace-step');
-  const [prompt, setPrompt] = useState('sparse low-register dissonant score, slow spectral movement, no drums, no heroic resolution');
+  const [prompt, setPrompt] = useState('dark underscore, sparse low strings, deep sub drone, slow spectral movement');
   const [negative, setNegative] = useState('');
   const [durationInput, setDurationInput] = useState(12);
   const [key, setKey] = useState('D');
@@ -148,7 +148,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
 
   const start = target.start;
 
-  /* Horror-first prompt preview — the composer always sees what is sent. */
+  /* Prompt preview — the composer always sees what is actually sent. */
   const refreshPreview = useCallback(async () => {
     if (generation.backendState !== 'online') return;
     try {
@@ -319,7 +319,8 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
           className="w-full rounded-lg border border-white/[0.09] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-bone outline-none placeholder:text-dim focus:border-ember/40"
         />
         <p className="mt-1 text-[9.5px] leading-relaxed text-dim">
-          Umbra always suppresses pop form, heroic trailer harmony and triumphant resolution.
+          Sent verbatim to the generator as the negative prompt. The local prompt builder folds your words and intent into
+          the final conditioning — the exact text is shown in “Conditioning sent to the model” before you commit.
         </p>
       </div>
 
@@ -429,7 +430,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
           <span className="eyebrow">Advanced</span>
           <span className="ml-auto text-[9.5px] text-dim">expert model controls</span>
         </button>
-        {advanced && (
+        {advanced && active && active.id !== 'umbra-procedural' && (
           <div className="flex flex-col gap-2.5 border-t border-white/[0.06] px-2.5 py-2.5">
             <Slider
               label="Inference steps"
@@ -461,9 +462,16 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
               />
             )}
             <p className="text-[9.5px] leading-relaxed text-dim">
-              Turbo checkpoints ignore guidance scale; 8 steps is the recommended default.
+              Turbo checkpoints ignore guidance scale; 8 steps is the recommended default. These controls are sent to the
+              model only when it is selected and ready.
             </p>
           </div>
+        )}
+        {advanced && active?.id === 'umbra-procedural' && (
+          <p className="border-t border-white/[0.06] px-2.5 py-2 text-[9.5px] leading-relaxed text-dim">
+            Umbra Procedural is deterministic browser synthesis — inference steps and guidance do not apply. The prompt, seed
+            and duration above are its only creative controls.
+          </p>
         )}
       </div>
 

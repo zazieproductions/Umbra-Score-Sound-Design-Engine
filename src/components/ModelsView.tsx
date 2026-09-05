@@ -22,6 +22,7 @@ import {
   type ProviderId,
   type ProviderStatus,
 } from '../lib/providers';
+import { capabilityEvidenceLabel, capabilityEvidenceNote, statusView, type StatusView } from '../lib/status';
 
 const ICON: Record<ProviderId, typeof Waves> = {
   'umbra-procedural': Waves,
@@ -53,26 +54,37 @@ function Cmd({ children }: { children: string }) {
   );
 }
 
-function StateBadge({ p }: { p: ProviderStatus }) {
-  if (p.ready) return <span className="chip border-brine/40 text-brine">ready</span>;
-  if (p.installed) return <span className="chip border-tan/40 text-tan">installed · not loaded</span>;
-  return <span className="chip border-white/12 text-dim">not installed</span>;
+const CHIP_TONE: Record<StatusView['tone'], string> = {
+  brine: 'border-brine/40 text-brine',
+  tan: 'border-tan/40 text-tan',
+  dim: 'border-white/12 text-dim',
+};
+
+function StateBadge({ p, verified }: { p: ProviderStatus; verified: boolean }) {
+  const v: StatusView = statusView(p, verified);
+  return (
+    <span className={`chip ${CHIP_TONE[v.tone]}`} title={v.detail}>
+      {v.label}
+    </span>
+  );
 }
 
-function ProviderCard({ p }: { p: ProviderStatus }) {
+function ProviderCard({ p, verified }: { p: ProviderStatus; verified: boolean }) {
   const Icon = ICON[p.id] ?? Waves;
+  const v: StatusView = statusView(p, verified);
   return (
     <div className="glass flex flex-col gap-2.5 rounded-xl p-3.5">
       <div className="flex items-start gap-2.5">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
-          <Icon size={15} className={p.ready ? 'text-ember' : 'text-dim'} />
+          <Icon size={15} className={p.ready || verified ? 'text-ember' : 'text-dim'} />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="truncate text-[12.5px] font-semibold text-bone">{p.label}</h3>
-            <StateBadge p={p} />
+            <StateBadge p={p} verified={verified} />
           </div>
           <p className="mt-0.5 text-[10.5px] leading-relaxed text-dim">{p.blurb}</p>
+          <p className="mt-0.5 text-[9.5px] leading-relaxed text-dim/80" title={v.detail}>{v.detail}</p>
         </div>
       </div>
 
@@ -111,7 +123,7 @@ function ProviderCard({ p }: { p: ProviderStatus }) {
       {p.capabilities.length > 0 && (
         <div className="border-t border-white/[0.06] pt-2.5">
           <span className="eyebrow mb-1 block text-[8px]">
-            Verified capabilities · {p.capabilities.length}
+            {capabilityEvidenceLabel(verified)} · {p.capabilities.length}
           </span>
           <div className="flex flex-wrap gap-1">
             {p.capabilities.map((c) => (
@@ -120,6 +132,7 @@ function ProviderCard({ p }: { p: ProviderStatus }) {
               </span>
             ))}
           </div>
+          <p className="mt-1.5 text-[9px] leading-relaxed text-dim/80">{capabilityEvidenceNote(verified)}</p>
         </div>
       )}
 
@@ -198,14 +211,22 @@ export default function ModelsView({ studio }: { studio: Studio }) {
           <p className="text-[11.5px] font-medium text-bone">
             {generation.backendState === 'online'
               ? 'Local inference backend connected'
-              : generation.backendState === 'checking'
-                ? 'Contacting local inference backend…'
-                : 'Local inference backend offline'}
+              : generation.backendState === 'error'
+                ? 'Local inference backend error'
+                : generation.backendState === 'checking'
+                  ? 'Contacting local inference backend…'
+                  : 'Local inference backend offline'}
           </p>
           <p className="mt-0.5 text-[10px] leading-relaxed text-dim">
             Trained models run in a local FastAPI service. Umbra Procedural runs entirely in this browser and needs
             no backend at all.
           </p>
+          {generation.backendError && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[10px] leading-relaxed text-tan/85">
+              <AlertTriangle size={10} className="mt-px shrink-0" />
+              {generation.backendError}
+            </p>
+          )}
           {generation.backendState === 'offline' && (
             <div className="mt-2 flex flex-col gap-1">
               <Cmd>python scripts/run_backend.py</Cmd>
@@ -263,7 +284,7 @@ export default function ModelsView({ studio }: { studio: Studio }) {
       {/* ----------------------------------------------------- providers */}
       <div className="grid gap-3 lg:grid-cols-2">
         {generation.providers.map((p) => (
-          <ProviderCard key={p.id} p={p} />
+          <ProviderCard key={p.id} p={p} verified={generation.isVerified(p.id)} />
         ))}
       </div>
 

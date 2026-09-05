@@ -23,7 +23,7 @@ import { makeClip } from './clips';
 import { renderProceduralClip } from './proceduralClip';
 import type { AudioClip, ClipProvider } from './types';
 
-export type BackendState = 'checking' | 'online' | 'offline';
+export type BackendState = 'checking' | 'online' | 'offline' | 'error';
 
 function toClipProvider(id: ProviderId): ClipProvider {
   if (id === 'ace-step' || id === 'stable-audio' || id === 'mmaudio' || id === 'umbra-procedural') return id;
@@ -45,8 +45,15 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
   const [runtime, setRuntime] = useState<RuntimeSummary | null>(null);
   const [jobs, setJobs] = useState<GenerationJob[]>([]);
   const [busy, setBusy] = useState(false);
+  const [backendError, setBackendError] = useState<string | null>(null);
+  /** providers that produced a real audio result this session (RUNTIME VERIFIED) */
+  const [verified, setVerified] = useState<ProviderId[]>([]);
   const pollers = useRef<Set<string>>(new Set());
   const mounted = useRef(true);
+
+  const markVerified = useCallback((id: ProviderId) => {
+    setVerified((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -63,10 +70,15 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
       if (!mounted.current) return;
       setProviders(list);
       setRuntime(health.runtime);
+      setBackendError(null);
       setBackendState('online');
     } catch (e) {
       if (!mounted.current) return;
-      setBackendState(e instanceof BackendOfflineError ? 'offline' : 'offline');
+      // Offline = nothing is listening. Anything else = the service answered
+      // with an error, which is a different, visible state — never collapsed.
+      const offline = e instanceof BackendOfflineError;
+      setBackendState(offline ? 'offline' : 'error');
+      setBackendError(offline ? null : (e as Error).message);
       setProviders([]);
       setRuntime(null);
     }
@@ -167,6 +179,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
         }
 
         onClip(clip);
+        markVerified(finished.provider);
         log(
           `${finished.provider}: ${r.duration.toFixed(2)}s @ ${r.sampleRate} Hz · ` +
             `${(r.bytes / 1024).toFixed(0)} KB → timeline @ ${placement.start.toFixed(2)}s`,
@@ -179,7 +192,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
         if (mounted.current) setBusy(pollers.current.size > 0);
       }
     },
-    [log, onClip],
+    [log, onClip, markVerified],
   );
 
   const generate = useCallback(
@@ -210,6 +223,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
           });
           await engine.prepareClip(clip);
           onClip(clip);
+          markVerified('umbra-procedural');
           log(`umbra-procedural: rendered ${seconds.toFixed(2)}s in the browser`, 'ok');
         } catch (e) {
           log(`procedural render failed: ${(e as Error).message}`, 'warn');
@@ -237,7 +251,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
         return null;
       }
     },
-    [log, providerById, trackJob, onClip],
+    [log, providerById, trackJob, onClip, markVerified],
   );
 
   const cancelJob = useCallback(
@@ -260,6 +274,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
 
   return {
     backendState,
+    backendError,
     providers: allProviders,
     providerById,
     capable,
@@ -267,6 +282,8 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
     jobs,
     activeJobs,
     busy,
+    verified,
+    isVerified: (id: ProviderId) => verified.includes(id),
     generate,
     cancelJob,
     refresh,
