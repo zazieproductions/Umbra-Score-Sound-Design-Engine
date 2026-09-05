@@ -50,6 +50,7 @@ export function MasterStrip({ studio }: { studio: Studio }) {
         <Slider label="Stereo width" value={m.width} max={1.8} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ width: v })} />
         <Slider label="Bus glue" value={m.glue} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ glue: v })} />
         <Slider label="Sub weight" value={m.subBoost} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ subBoost: v })} />
+        <Slider label="Hit ducking" value={m.ducking} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ ducking: v })} />
         <Slider label="Air" value={m.air} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ air: v })} />
         <Slider label="Room" value={m.roomMix} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ roomMix: v })} />
         <Slider label="Stage" value={m.hallMix} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => studio.setMaster({ hallMix: v })} />

@@ -156,8 +156,8 @@ export function PipelineView({ studio }: { studio: Studio }) {
     { k: 'Ingest & probe', d: 'container demux, colour + fps probe, checksum', done: true },
     { k: 'Shot segmentation', d: 'frame differential, flow clustering, cut refine', done: studio.readyCount > 0 },
     { k: 'Semantic tagging', d: 'CLIP scene labels, motion energy, tension curve', done: studio.readyCount > 1 },
-    { k: 'Layer planning', d: 'assigns 4–6 layer classes and a reverb space per scene', done: studio.readyCount > 1 },
-    { k: 'Diffusion synthesis', d: 'DREADNET v4 · 32 steps · 48 kHz latent audio', done: !studio.analyzing },
+    { k: 'Layer planning', d: 'assigns 6–9 layer classes, a musical key and a reverb space per scene', done: studio.readyCount > 1 },
+    { k: 'Orchestration & synthesis', d: 'CINEWORKS v5 · 32 steps · 48 kHz layered audio', done: !studio.analyzing },
     { k: 'Conform & master', d: 'glue comp → tape drive → M/S widen → true-peak limit', done: !studio.analyzing },
   ];
 
@@ -539,7 +539,7 @@ export function CloudView({ studio }: { studio: Studio }) {
 /* --------------------------------------------------------------- settings */
 
 export function SettingsView({ studio }: { studio: Studio }) {
-  const [model, setModel] = useState('DREADNET-v4-XL');
+  const [model, setModel] = useState('CINEWORKS-v5');
   const [steps, setSteps] = useState(32);
   const [sr, setSr] = useState('48 kHz');
   const [guidance, setGuidance] = useState(7.5);
@@ -554,7 +554,7 @@ export function SettingsView({ studio }: { studio: Studio }) {
               <div>
                 <span className="eyebrow mb-1.5 block">Base model</span>
                 <div className="grid grid-cols-2 gap-1.5">
-                  {['DREADNET-v4', 'DREADNET-v4-XL', 'PHANTOM-fx-3', 'CHORALIS-1'].map((m) => (
+                  {['CINEWORKS-v5', 'HOLOGRAD-2', 'TITANSCORE-3', 'CHORALIS-2'].map((m) => (
                     <button
                       key={m}
                       onClick={() => {

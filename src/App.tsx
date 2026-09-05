@@ -49,7 +49,7 @@ export default function App() {
               UMBRA<span className="text-ember">·</span>SCORE
             </h1>
             <span className="hidden h-4 w-px bg-white/12 sm:block" />
-            <span className="eyebrow hidden sm:block">AI Horror Audio Suite</span>
+            <span className="eyebrow hidden sm:block">Cinematic Score &amp; Sound Design Engine</span>
           </div>
 
           {project && (

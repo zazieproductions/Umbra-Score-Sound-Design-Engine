@@ -1,74 +1,71 @@
+# UMBRA·SCORE
 
+**Cinematic Score & Sound Design Engine** — a fully client-side synthesizer that turns a video cut into a layered, Hollywood-grade film score. No samples, no cloud: every stem is synthesized and mixed in-browser through the Web Audio API, then bounced to a real 24-bit / 48 kHz WAV.
 
-UMBRA·SCORE, a browser-based AI horror audio production studio with a charcoal/crimson/violet glassmorphism aesthetic, left nav rail, central workspace and right control panel.
-Key features: video upload (real file ingest with duration probing) or demo reel, simulated scene-by-scene vision analysis with a live pipeline log, a zoomable multi-lane timeline with rendered waveforms, snapping, playhead scrubbing and stinger hit markers, and per-scene layered audio controls (gain/pan/reverb/tone/intensity, mute/solo, regenerate, delete, add layer) driven by a real Web Audio synthesis engine — drones, sub pressure, ambience, whisper textures, foley, heartbeat pulse and stingers all actually play with live spectrum and per-layer meters. Plus scene detection grid, generation pipeline with batch ops, searchable asset manager with audition/download, HD export presets with a working render queue, cloud shard status dashboard, and an engine settings view.
+> "Score it like a Hollywood mix. Frame by frame."
 
-Currently, two official plugins are available:
+## What it generates
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+UMBRA analyzes a reel into scenes (tension, motion, sync hits), assigns each scene a musical key, then scores it with **17 layer classes**:
 
-## React Compiler
+| Family | Layers |
+| --- | --- |
+| Beds | Drone Bed · Sub Pressure · Ambience · Whisper Texture |
+| Orchestra | String Section · Choir Pad · Braam · Brass Stab |
+| Rhythm / Tension | Heart Pulse · Tension Tick · Taiko / Percussion |
+| Transitions | Riser · Downlifter · Whoosh Pass |
+| Detail | Foley · Stinger · Impact |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Pitched layers resolve to a shared scene key, so strings, choir, brass and braams sit in the same harmonic space — the whole cut plays like one composed score, not a wall of unrelated drones.
 
-## Expanding the ESLint configuration
+## The audio chain
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+voices ─┬─► channel strip (HP · bell · air · pan · Haas width)
+        │      └─► sends → room / scoring stage / cathedral convolvers
+        │
+music layers → musicSum → duck (hit sidechain) ─┐
+hit layers   → hitSum ──────────────────────────┤
+sub layers   → sub bus (LP · octave · 46 Hz res)┤
+                                               ▼
+tension macro → glue comp → tape drive → tilt EQ → M/S widen
+     → parallel exciter → brickwall → true-peak lookahead limiter
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Every render then runs a **post master**:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+1. **ITU-R BS.1770 loudness measurement** (K-weighting, 400 ms blocks, absolute + relative gating) → conformed to **-16 LUFS**.
+2. **Lookahead true-peak limiting** (5 ms sliding-window max, instant attack, smooth release) → **-1 dBTP** ceiling.
+3. 24-bit PCM encode (TPDF-dithered at 16-bit).
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Key mixing moves for the theatrical feel:
+
+- **Hit ducking** — impacts, stingers, braams, brass and taiko sidechain the music bed, so every hit lands with real pump.
+- **Sub-harmonic LFE** — layered fundamental + fifth + sub-octave, rectified octave reinforcement, and a resonant 46 Hz shelf so the weight survives small speakers.
+- **Immersive space** — procedural stereo impulse responses with early reflections and decorrelated tails, Haas width, drifting ambience pans, and a reverse-bloom convolver for pre-swell tails.
+- **Dramatic dynamic range** — a tension macro rides the whole mix, scenes swell toward their tension peak, and equal-power crossfades with a sub "brake" polish every seam.
+
+## Running it
+
+```bash
+npm install
+npm run dev      # local dev server with HMR
+npm run build    # typecheck + production bundle
+npm run lint     # eslint
+```
+
+Load the demo reel or drop a video (MP4 / MOV / ProRes / WebM, up to 4K). Use the **Mix** panel to ride the master bus, solo/mute/audition layers, and bounce stems; **Export** renders the full score to WAV in-browser.
+
+## Project layout
+
+```
+src/lib/
+  types.ts       layer kinds, scenes, project model, metadata
+  dsp.ts         master bus, channel strips, reverbs, ducking
+  voices.ts      per-layer synthesis graphs (17 classes)
+  generate.ts    scene/key planning and layer generation
+  render.ts      offline render + loudness/true-peak post master
+  audio.ts       realtime monitoring engine
+  useStudio.ts   React state + transport + export orchestration
+src/components/  UI (viewer, timeline, mixer, exports, assets…)
 ```

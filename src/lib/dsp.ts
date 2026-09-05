@@ -8,10 +8,13 @@ import type { LayerKind } from './types';
  *
  *   voices ─┬─► channel strip (HP · bell · air shelf · pan · Haas width)
  *           │        └─► sends ─► room / stage / cathedral convolvers ─┐
- *           └─► sub bus ─► LP + rectifier octave + drive ──────────────┤
+ *           │                                                          │
+ *   music layers ─► musicSum ─► duck (hit sidechain) ──────────────────┤
+ *   hit layers   ─► hitSum ────────────────────────────────────────────┤
+ *   sub layers   ─► sub bus ─► LP + octave + resonance + drive ────────┤
  *                                                                     ▼
  *   dynamics (tension macro) ─► glue comp ─► tape drive ─► tilt EQ
- *        ─► mid/side widener ─► brickwall limiter ─► out
+ *        ─► mid/side widener ─► (+ parallel exciter) ─► brickwall ─► out
  * ==================================================================== */
 
 export interface MasterParams {
@@ -21,23 +24,25 @@ export interface MasterParams {
   glue: number;     // 0 .. 1   bus compression
   ceiling: number;  // -6 .. 0  dBTP limiter ceiling
   subBoost: number; // 0 .. 1
+  ducking: number;  // 0 .. 1   impact sidechain depth
   roomMix: number;  // 0 .. 1
   hallMix: number;  // 0 .. 1
   cathMix: number;  // 0 .. 1
-  air: number;      // 0 .. 1   high shelf
+  air: number;      // 0 .. 1   high shelf + exciter
 }
 
 export const DEFAULT_MASTER: MasterParams = {
-  volume: 0.92,
-  drive: 0.3,
-  width: 1.2,
-  glue: 0.55,
+  volume: 0.95,
+  drive: 0.34,
+  width: 1.3,
+  glue: 0.6,
   ceiling: -1,
-  subBoost: 0.6,
-  roomMix: 0.26,
-  hallMix: 0.32,
-  cathMix: 0.16,
-  air: 0.34,
+  subBoost: 0.66,
+  ducking: 0.55,
+  roomMix: 0.28,
+  hallMix: 0.34,
+  cathMix: 0.18,
+  air: 0.38,
 };
 
 export function f32(n: number): Float32Array<ArrayBuffer> {
@@ -167,11 +172,21 @@ export function gainNode(ctx: BaseAudioContext, v: number): GainNode {
   return g;
 }
 
+/** Kinds routed to the transient (un-ducked) bus so their punch survives. */
+export const HIT_KINDS: LayerKind[] = ['impact', 'stinger', 'braam', 'percussion', 'brass'];
+/** Kinds that feed the dedicated low-frequency bus. */
+export const SUB_KINDS: LayerKind[] = ['sub'];
+/** Kinds whose low end also taps the sub bus for extra LFE weight. */
+export const BASS_KINDS: LayerKind[] = ['impact', 'braam', 'percussion', 'pulse', 'stinger'];
+
 /* ------------------------------------------------------------- master --- */
 
 export interface MasterChain {
   ctx: BaseAudioContext;
   sum: GainNode;
+  musicSum: GainNode;
+  hitSum: GainNode;
+  duckGain: GainNode;
   subBus: GainNode;
   dynamics: GainNode;
   sendRoom: GainNode;
@@ -184,6 +199,8 @@ export interface MasterChain {
   out: GainNode;
   params: MasterParams;
   setParams(p: Partial<MasterParams>, when: number, glide: number): void;
+  /** dip the music bed under a hit — theatrical "pump" */
+  duck(when: number, depth: number, attack?: number, release?: number): void;
 }
 
 export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality: 'live' | 'render' = 'live'): MasterChain {
@@ -191,9 +208,15 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   const noise = makeNoise(ctx, 5, 20240);
 
   const sum = gainNode(ctx, 1);
+  const musicSum = gainNode(ctx, 1);
+  const duckGain = gainNode(ctx, 1);
+  const hitSum = gainNode(ctx, 1);
   const dynamics = gainNode(ctx, 1);
+  musicSum.connect(duckGain);
+  duckGain.connect(sum);
+  hitSum.connect(sum);
 
-  /* --- sub bus: lowpass + rectified octave + gentle drive --------------- */
+  /* --- sub bus: lowpass + rectified octave + resonance + drive --------- */
   const subBus = gainNode(ctx, 1);
   const subLP = biquad(ctx, 'lowpass', 118, 0.9);
   const subHP = biquad(ctx, 'highpass', 22, 0.7);
@@ -201,11 +224,13 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   subDrive.curve = driveCurve(0.35);
   subDrive.oversample = '4x';
   const subGain = gainNode(ctx, 1);
+  const subRes = biquad(ctx, 'peaking', 46, 0.7, 2.5); // resonant weight
   subBus.connect(subLP);
   subLP.connect(subHP);
   subHP.connect(subDrive);
   subDrive.connect(subGain);
-  subGain.connect(sum);
+  subGain.connect(subRes);
+  subRes.connect(sum);
 
   // psychoacoustic octave-up so the weight survives small speakers
   const octBP = biquad(ctx, 'bandpass', 78, 1.1);
@@ -237,13 +262,13 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   };
 
   const room = mk({ seconds: 0.85, decay: 5.4, predelay: 0.006, damp: 0.62, seed: 11, spread: 0.5 }, 190);
-  const hall = mk({ seconds: quality === 'live' ? 2.6 : 3.1, decay: 2.3, predelay: 0.021, damp: 0.5, seed: 29, spread: 1 }, 170);
-  const cath = mk({ seconds: quality === 'live' ? 4.4 : 5.6, decay: 1.05, predelay: 0.048, damp: 0.32, seed: 47, spread: 1.7 }, 140);
+  const hall = mk({ seconds: quality === 'live' ? 3.1 : 3.6, decay: 2.3, predelay: 0.021, damp: 0.5, seed: 29, spread: 1 }, 170);
+  const cath = mk({ seconds: quality === 'live' ? 4.4 : 6.2, decay: 1.05, predelay: 0.048, damp: 0.32, seed: 47, spread: 1.7 }, 140);
 
   // reverse-bloom convolver used by impacts / risers for pre-swell tails
   const reverseVerb = ctx.createConvolver();
   reverseVerb.normalize = true;
-  reverseVerb.buffer = makeIR(ctx, { seconds: 1.5, decay: 1.6, predelay: 0, damp: 0.45, seed: 71, reverse: true });
+  reverseVerb.buffer = makeIR(ctx, { seconds: 1.6, decay: 1.6, predelay: 0, damp: 0.45, seed: 71, reverse: true });
   const revRet = gainNode(ctx, 0.55);
   reverseVerb.connect(revRet);
   revRet.connect(sum);
@@ -303,6 +328,19 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   outL.connect(merge, 0, 0);
   outR.connect(merge, 0, 1);
 
+  /* --- parallel exciter: adds sheen to the mid channel ------------------ */
+  const exciteIn = gainNode(ctx, 1);
+  const exciteHP = biquad(ctx, 'highpass', 6500, 0.7);
+  const exciteShaper = ctx.createWaveShaper();
+  exciteShaper.curve = driveCurve(0.22);
+  exciteShaper.oversample = '4x';
+  const exciteGain = gainNode(ctx, 0);
+  satMix.connect(exciteIn);
+  exciteIn.connect(exciteHP);
+  exciteHP.connect(exciteShaper);
+  exciteShaper.connect(exciteGain);
+  exciteGain.connect(mid);
+
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = p.ceiling - 0.4;
   limiter.knee.value = 0;
@@ -330,6 +368,8 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   out.connect(loud);
   out.connect(ctx.destination);
 
+  let duckLevel = 1;
+
   const setParams = (patch: Partial<MasterParams>, when: number, glide: number) => {
     Object.assign(p, patch);
     const set = (param: AudioParam, v: number) => {
@@ -345,17 +385,34 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
     set(glue.ratio, 1.4 + p.glue * 3.2);
     set(limiter.threshold, p.ceiling - 0.4);
     set(subGain.gain, 0.55 + p.subBoost * 1.15);
+    set(subRes.gain, p.subBoost * 5);
     set(octGain.gain, p.subBoost * 0.32);
     set(room.ret.gain, p.roomMix * 0.95);
     set(hall.ret.gain, p.hallMix * 0.95);
     set(cath.ret.gain, p.cathMix * 0.9);
     set(airShelf.gain, -1 + p.air * 6.5);
+    set(exciteGain.gain, p.air * 0.22);
   };
   setParams(p, ctx.currentTime, 0);
+
+  const duck = (when: number, depth: number, attack = 0.008, release = 0.3) => {
+    const g = duckGain.gain;
+    const t = Math.max(0, when);
+    const d = Math.min(0.95, Math.max(0, depth));
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(duckLevel, t);
+    const floor = Math.max(0.05, 1 - d);
+    g.exponentialRampToValueAtTime(floor, t + attack);
+    g.exponentialRampToValueAtTime(1, t + attack + release);
+    duckLevel = 1;
+  };
 
   return {
     ctx,
     sum,
+    musicSum,
+    hitSum,
+    duckGain,
     subBus,
     dynamics,
     sendRoom: room.send,
@@ -368,6 +425,7 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
     out,
     params: p,
     setParams,
+    duck,
   };
 }
 
@@ -391,8 +449,6 @@ export interface Channel {
   subFeed: GainNode;
   dispose(): void;
 }
-
-const SUB_KINDS: LayerKind[] = ['sub'];
 
 export function buildChannel(m: MasterChain, kind: LayerKind): Channel {
   const ctx = m.ctx;
@@ -432,8 +488,10 @@ export function buildChannel(m: MasterChain, kind: LayerKind): Channel {
   fader.connect(meter);
   if (SUB_KINDS.includes(kind)) {
     fader.connect(m.subBus);
+  } else if (HIT_KINDS.includes(kind)) {
+    fader.connect(m.hitSum);
   } else {
-    fader.connect(m.sum);
+    fader.connect(m.musicSum);
   }
   fader.connect(sendRoom);
   fader.connect(sendHall);
