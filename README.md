@@ -1,6 +1,7 @@
-# React + TypeScript + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+UMBRA·SCORE, a browser-based AI horror audio production studio with a charcoal/crimson/violet glassmorphism aesthetic, left nav rail, central workspace and right control panel.
+Key features: video upload (real file ingest with duration probing) or demo reel, simulated scene-by-scene vision analysis with a live pipeline log, a zoomable multi-lane timeline with rendered waveforms, snapping, playhead scrubbing and stinger hit markers, and per-scene layered audio controls (gain/pan/reverb/tone/intensity, mute/solo, regenerate, delete, add layer) driven by a real Web Audio synthesis engine — drones, sub pressure, ambience, whisper textures, foley, heartbeat pulse and stingers all actually play with live spectrum and per-layer meters. Plus scene detection grid, generation pipeline with batch ops, searchable asset manager with audition/download, HD export presets with a working render queue, cloud shard status dashboard, and an engine settings view.
 
 Currently, two official plugins are available:
 
