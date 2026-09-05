@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Layer, LayerKind, Project, RenderJob, Scene } from './types';
+import type { AudioClip, Layer, LayerKind, Project, RenderJob, Scene } from './types';
 import { addLayer as makeLayer, analyzeProject, regenerateLayer } from './generate';
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
-import { download, renderScore, renderStem } from './render';
+import { download, renderClipStem, renderScore, renderStem } from './render';
+import { clipEnd, moveClip, splitClip, trimClip } from './clips';
+import { useGeneration } from './useGeneration';
+import type { GenerateRequest } from './providers';
 
 export interface LogLine {
   id: string;
@@ -26,19 +29,14 @@ export function useStudio() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
   const [regenerating, setRegenerating] = useState<Record<string, number>>({});
-  const [gpuLoad, setGpuLoad] = useState(38);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  /** in/out points on the project timeline used to target generation */
+  const [range, setRange] = useState<{ start: number; end: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timers = useRef<number[]>([]);
 
   const log = useCallback((text: string, level: LogLine['level'] = 'info') => {
     setLogs((prev) => [{ id: `lg${logSeq++}`, at: Date.now(), level, text }, ...prev].slice(0, 120));
-  }, []);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setGpuLoad((g) => Math.max(12, Math.min(97, g + (Math.random() - 0.48) * 14)));
-    }, 1600);
-    return () => window.clearInterval(id);
   }, []);
 
   useEffect(
@@ -65,7 +63,6 @@ export function useStudio() {
       setAnalyzing(true);
       setAnalyzeProgress(0);
       log(`ingest: ${name} · ${duration.toFixed(1)}s · sha256 verified`, 'ok');
-      log('cloud: allocating A100 shard eu-north-1b · 48 kHz pipeline', 'gpu');
 
       const total = p.scenes.length;
       p.scenes.forEach((s, i) => {
@@ -192,9 +189,36 @@ export function useStudio() {
   }, [monitorScene, time]);
 
   useEffect(() => {
-    if (audioOn && playing) engine.start(liveLayers);
-    else if (audioOn && engine.isRunning()) engine.update(liveLayers);
+    if (audioOn && playing) engine.start(liveLayers, project?.clips ?? [], time);
+    else if (audioOn && engine.isRunning()) engine.update(liveLayers, project?.clips ?? [], time);
+    // `time` intentionally excluded: clip scheduling is driven by the tick
+    // effect below so we do not rebuild the voice pool every animation frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioOn, playing, liveLayers]);
+
+  // Clip scheduling tick — coarse (4 Hz) because clips are scheduled ahead of
+  // time by the Web Audio clock; this only decides *which* clips are live.
+  const clipsRef = useRef<AudioClip[]>([]);
+  const timeRef = useRef(0);
+
+  useEffect(() => {
+    clipsRef.current = project?.clips ?? [];
+    timeRef.current = time;
+  });
+
+  useEffect(() => {
+    if (!audioOn || !playing) return;
+    const id = window.setInterval(() => {
+      engine.tickClips(clipsRef.current, timeRef.current);
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [audioOn, playing]);
+
+  // Clip edits while paused should still be reflected in the monitor.
+  useEffect(() => {
+    if (audioOn && engine.isRunning()) engine.tickClips(project?.clips ?? [], time);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.clips, audioOn]);
 
   useEffect(() => {
     if (!audioOn || !playing) engine.stop();
@@ -302,6 +326,197 @@ export function useStudio() {
     [project, regenLayer, log],
   );
 
+  /* ------------------------------------------------------------ clips */
+
+  const clips = useMemo(() => project?.clips ?? [], [project?.clips]);
+
+  /** Every provider result lands here — one shared timeline, one clip model. */
+  const addClip = useCallback((clip: AudioClip) => {
+    setProject((cur) => (cur ? { ...cur, clips: [...cur.clips, clip] } : cur));
+    setSelectedClipId(clip.id);
+  }, []);
+
+  const patchClip = useCallback((clipId: string, patch: Partial<AudioClip>) => {
+    setProject((cur) =>
+      cur ? { ...cur, clips: cur.clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)) } : cur,
+    );
+  }, []);
+
+  const removeClip = useCallback(
+    (clipId: string) => {
+      setProject((cur) => (cur ? { ...cur, clips: cur.clips.filter((c) => c.id !== clipId) } : cur));
+      setSelectedClipId((id) => (id === clipId ? null : id));
+      log('clip removed from timeline', 'warn');
+    },
+    [log],
+  );
+
+  const dragClip = useCallback(
+    (clipId: string, to: number) => {
+      setProject((cur) => {
+        if (!cur) return cur;
+        return {
+          ...cur,
+          clips: cur.clips.map((c) => (c.id === clipId ? moveClip(c, to, cur.duration) : c)),
+        };
+      });
+    },
+    [],
+  );
+
+  const trim = useCallback((clipId: string, edge: 'start' | 'end', delta: number) => {
+    setProject((cur) =>
+      cur
+        ? { ...cur, clips: cur.clips.map((c) => (c.id === clipId ? trimClip(c, edge, delta) : c)) }
+        : cur,
+    );
+  }, []);
+
+  const split = useCallback(
+    (clipId: string, at: number) => {
+      setProject((cur) => {
+        if (!cur) return cur;
+        const target = cur.clips.find((c) => c.id === clipId);
+        if (!target) return cur;
+        const parts = splitClip(target, at);
+        if (!parts) {
+          log('split point is outside the clip', 'warn');
+          return cur;
+        }
+        log(`clip split at ${at.toFixed(2)}s`, 'info');
+        return { ...cur, clips: cur.clips.flatMap((c) => (c.id === clipId ? parts : [c])) };
+      });
+    },
+    [log],
+  );
+
+  const toggleClipMute = useCallback(
+    (clipId: string) => {
+      const c = clips.find((x) => x.id === clipId);
+      if (c) patchClip(clipId, { muted: !c.muted });
+    },
+    [clips, patchClip],
+  );
+
+  const toggleClipSolo = useCallback(
+    (clipId: string) => {
+      const c = clips.find((x) => x.id === clipId);
+      if (c) patchClip(clipId, { solo: !c.solo });
+    },
+    [clips, patchClip],
+  );
+
+  const selectedClip = useMemo(
+    () => clips.find((c) => c.id === selectedClipId) ?? null,
+    [clips, selectedClipId],
+  );
+
+  /* ------------------------------------------------------- generation */
+
+  const generation = useGeneration({ onClip: addClip, log });
+
+  /** Queue a generation targeted at a point on the timeline. */
+  const generateClip = useCallback(
+    async (req: Omit<GenerateRequest, 'timelineStart'> & { timelineStart?: number }) => {
+      const start = req.timelineStart ?? range?.start ?? time;
+      return generation.generate(
+        { ...req, timelineStart: start, sceneId: req.sceneId ?? activeSceneId },
+        { start, name: req.label ?? 'Generated cue' },
+      );
+    },
+    [generation, range, time, activeSceneId],
+  );
+
+  /**
+   * Continue an existing musical clip.
+   *
+   * The continuation is placed immediately after its source and inherits the
+   * source's key, tempo and prompt so the two read as one cue.
+   */
+  const continueClip = useCallback(
+    async (clip: AudioClip, seconds: number) => {
+      const m = clip.metadata;
+      return generation.generate(
+        {
+          provider: 'ace-step',
+          task: 'continue',
+          prompt: (m.prompt as string) || 'continue this cue without introducing new thematic material',
+          negativePrompt: (m.negativePrompt as string) || undefined,
+          duration: seconds,
+          key: (m.key as string) ?? null,
+          mode: (m.mode as string) ?? null,
+          bpm: (m.bpm as number) ?? null,
+          timeSignature: (m.timeSignature as string) ?? null,
+          sourceAudioId: clip.audioId,
+          timelineStart: clipEnd(clip),
+          sceneId: activeSceneId,
+          label: `${clip.name} (cont.)`,
+        },
+        { start: clipEnd(clip), name: `${clip.name} (cont.)` },
+      );
+    },
+    [generation, activeSceneId],
+  );
+
+  /** Regenerate a selected window inside a clip, preserving the rest. */
+  const repaintClip = useCallback(
+    async (clip: AudioClip, from: number, to: number, prompt?: string) => {
+      const m = clip.metadata;
+      const localFrom = Math.max(0, from - clip.start);
+      const localTo = Math.min(clip.duration, to - clip.start);
+      if (localTo - localFrom < 0.5) {
+        log('select at least half a second inside the clip to repaint', 'warn');
+        return null;
+      }
+      return generation.generate(
+        {
+          provider: 'ace-step',
+          task: 'repaint',
+          prompt: prompt || (m.prompt as string) || '',
+          negativePrompt: (m.negativePrompt as string) || undefined,
+          duration: clip.duration,
+          key: (m.key as string) ?? null,
+          mode: (m.mode as string) ?? null,
+          bpm: (m.bpm as number) ?? null,
+          sourceAudioId: clip.audioId,
+          repaintStart: localFrom,
+          repaintEnd: localTo,
+          timelineStart: clip.start,
+          sceneId: activeSceneId,
+          label: `${clip.name} (repaint)`,
+        },
+        { start: clip.start, name: `${clip.name} v${clip.version + 1}` },
+      );
+    },
+    [generation, activeSceneId, log],
+  );
+
+  /** Re-run a clip's own generation settings with a fresh seed. */
+  const regenerateClip = useCallback(
+    async (clip: AudioClip) => {
+      const m = clip.metadata;
+      const settings = (m.generationSettings ?? {}) as Record<string, unknown>;
+      return generation.generate(
+        {
+          provider: (m.provider === 'library' || m.provider === 'user' ? 'ace-step' : m.provider) as never,
+          prompt: (m.prompt as string) || (settings.prompt as string) || '',
+          negativePrompt: (m.negativePrompt as string) || undefined,
+          duration: clip.duration,
+          seed: null, // new variant
+          key: (m.key as string) ?? null,
+          mode: (m.mode as string) ?? null,
+          bpm: (m.bpm as number) ?? null,
+          timeSignature: (m.timeSignature as string) ?? null,
+          timelineStart: clip.start,
+          sceneId: activeSceneId,
+          label: `${clip.name} v${clip.version + 1}`,
+        },
+        { start: clip.start, name: `${clip.name} v${clip.version + 1}` },
+      );
+    },
+    [generation, activeSceneId],
+  );
+
   /* ----------------------------------------------------------- export */
 
   const patchJob = (id: string, patch: Partial<RenderJob>) =>
@@ -313,7 +528,7 @@ export function useStudio() {
       label: string,
       format: string,
       resolution: string,
-      opts?: { scene?: Scene; layer?: Layer; filename?: string; maxSeconds?: number },
+      opts?: { scene?: Scene; layer?: Layer; clip?: AudioClip; filename?: string; maxSeconds?: number },
     ) => {
       if (!project) return;
       const id = `J${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -337,8 +552,9 @@ export function useStudio() {
       try {
         // yield so the UI paints the queue entry before the heavy render
         await new Promise((r) => setTimeout(r, 40));
-        const result =
-          opts?.layer && opts.scene
+        const result = opts?.clip
+          ? await renderClipStem(opts.clip, master)
+          : opts?.layer && opts.scene
             ? await renderStem(opts.scene, opts.layer, master)
             : await renderScore(project, master, { maxSeconds: opts?.maxSeconds ?? 240 }, opts?.scene);
         window.clearInterval(creep);
@@ -356,10 +572,14 @@ export function useStudio() {
           peak: result.peakDb,
           lufs: result.lufs,
         });
+        const clipNote = result.clipsPlaced ? ` · ${result.clipsPlaced} generated clip(s) baked in` : '';
         log(
-          `render complete: ${filename} · ${result.seconds.toFixed(1)}s · peak ${result.peakDb.toFixed(1)} dBTP · ${result.lufs.toFixed(1)} LUFS`,
+          `render complete: ${filename} · ${result.seconds.toFixed(1)}s · peak ${result.peakDb.toFixed(1)} dBTP · ${result.lufs.toFixed(1)} LUFS${clipNote}`,
           'ok',
         );
+        if (result.clipsFailed?.length) {
+          log(`render warning: could not decode ${result.clipsFailed.join(', ')} — omitted from the master`, 'warn');
+        }
       } catch (e) {
         window.clearInterval(creep);
         patchJob(id, { state: 'failed', progress: 100 });
@@ -402,7 +622,6 @@ export function useStudio() {
     analyzing,
     analyzeProgress,
     regenerating,
-    gpuLoad,
     videoRef,
     loadDemo,
     uploadFile,
@@ -416,6 +635,28 @@ export function useStudio() {
     readyCount,
     layerCount,
     log,
+
+    /* clips + generation */
+    clips,
+    selectedClip,
+    selectedClipId,
+    setSelectedClipId,
+    addClip,
+    patchClip,
+    removeClip,
+    dragClip,
+    trimClip: trim,
+    splitClip: split,
+    toggleClipMute,
+    toggleClipSolo,
+    range,
+    setRange,
+    generation,
+    generateClip,
+    continueClip,
+    repaintClip,
+    regenerateClip,
+
     reset: () => {
       engine.stop();
       setProject(null);
@@ -423,6 +664,8 @@ export function useStudio() {
       setTime(0);
       setJobs([]);
       setLogs([]);
+      setSelectedClipId(null);
+      setRange(null);
     },
   };
 }

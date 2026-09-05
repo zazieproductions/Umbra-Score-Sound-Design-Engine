@@ -79,7 +79,12 @@ const SCENE_BANK: BankEntry[] = [
   },
 ];
 
-const MODELS = ['CINEWORKS-v5', 'HOLOGRAD-2', 'TITANSCORE-3', 'SUBSONICA-v4', 'CHORALIS-2', 'MAESTRO-fx'];
+/*
+ * Procedural layers are synthesised by Umbra's own Web Audio voices — there is
+ * no trained model behind them. The label names the real synthesis class so the
+ * UI never implies a model that does not exist.
+ */
+const PROCEDURAL_ENGINE = 'umbra-voices-17';
 
 function mkLayer(kind: LayerKind, rnd: () => number, space: SpaceId, tension: number, root: number): Layer {
   const meta = KIND_META[kind];
@@ -89,7 +94,7 @@ function mkLayer(kind: LayerKind, rnd: () => number, space: SpaceId, tension: nu
     id: `L${Math.floor(rnd() * 1e9).toString(36)}${Math.floor(rnd() * 1e6).toString(36)}`,
     name: meta.label,
     kind,
-    model: MODELS[Math.floor(rnd() * MODELS.length)],
+    model: PROCEDURAL_ENGINE,
     gain: 0.66 + rnd() * 0.32,
     pan: bassy ? 0 : (rnd() * 2 - 1) * 0.72,
     reverb: kind === 'sub' ? 0.08 : 0.38 + rnd() * 0.5,
@@ -151,6 +156,7 @@ export function analyzeProject(name: string, duration: number, videoUrl: string 
     resolution: '3840 × 2160',
     videoUrl,
     scenes,
+    clips: [],
     createdAt: Date.now(),
   };
 }
@@ -167,7 +173,7 @@ export function regenerateLayer(l: Layer): Layer {
     reverb: clamp(l.reverb + (rnd() - 0.5) * 0.4, 0),
     width: clamp(l.width + (rnd() - 0.5) * 0.4, 0),
     attack: clamp(l.attack + (rnd() - 0.5) * 0.4, 0),
-    model: MODELS[Math.floor(rnd() * MODELS.length)],
+    model: PROCEDURAL_ENGINE,
   };
 }
 

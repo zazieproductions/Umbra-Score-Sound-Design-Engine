@@ -1,0 +1,23 @@
+# Optional providers and analysis tools.
+# Install only the ones you actually want — every provider reports itself as
+# "not installed" until its dependencies and weights are genuinely present.
+
+# --- Stable Audio Open (text -> sound design) -------------------------------
+# Inference runs through Diffusers' StableAudioPipeline.
+diffusers>=0.37.0
+transformers>=4.51.0,<4.58.0
+
+# --- CLAP (semantic audio search) -------------------------------------------
+# Uses transformers' ClapModel; no extra package required beyond the above.
+
+# --- PySceneDetect (real cut detection) -------------------------------------
+scenedetect[opencv]>=0.6.4
+
+# --- Personalization / LoRA (see docs/PERSONALIZATION.md) -------------------
+# Only needed once inference is stable and you want to train an adapter.
+# peft>=0.18.0
+# lycoris-lora
+# lightning>=2.0.0
+
+# --- MMAudio (video -> synchronized audio) ----------------------------------
+# Install from source per that project's instructions; there is no PyPI wheel.

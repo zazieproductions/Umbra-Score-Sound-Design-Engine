@@ -1,7 +1,8 @@
 import { buildMaster, type MasterParams } from './dsp';
 import { buildVoice } from './voices';
 import { mulberry32 } from './prng';
-import { KIND_META, type Layer, type Project, type Scene } from './types';
+import { clipEnd, loadClipBuffer, scheduleClip } from './clips';
+import { KIND_META, type AudioClip, type Layer, type Project, type Scene } from './types';
 
 /** Static fader target for a layer — mirrors applyStrip() in voices.ts. */
 function faderTarget(l: Layer, tension: number): number {
@@ -23,6 +24,10 @@ export interface RenderResult {
   lufs: number;
   seconds: number;
   bytes: number;
+  /** generated clips included in this bounce */
+  clipsPlaced?: number;
+  /** clips whose audio could not be decoded — reported, never hidden */
+  clipsFailed?: string[];
 }
 
 export interface RenderOpts {
@@ -113,6 +118,66 @@ function schedule(ctx: OfflineAudioContext, master: ReturnType<typeof buildMaste
       }
     }
   }
+}
+
+/**
+ * Schedule generated clips into the offline graph.
+ *
+ * This is what makes the acceptance test true: the exported master contains
+ * the *exact* audio the composer heard, because the bounce decodes the same
+ * files and runs them through the same master chain as the monitor. Nothing
+ * is re-generated at export time and nothing is approximated.
+ *
+ * Returns the clips that were actually placed, so the caller can report
+ * honestly if one failed to decode.
+ */
+async function scheduleClips(
+  ctx: OfflineAudioContext,
+  master: ReturnType<typeof buildMaster>,
+  clips: AudioClip[],
+  windowStart: number,
+  windowEnd: number,
+): Promise<{ placed: AudioClip[]; failed: AudioClip[] }> {
+  const anySolo = clips.some((c) => c.solo);
+  const audible = clips.filter((c) => {
+    if (c.muted || (anySolo && !c.solo)) return false;
+    return clipEnd(c) > windowStart && c.start < windowEnd;
+  });
+
+  const placed: AudioClip[] = [];
+  const failed: AudioClip[] = [];
+
+  // Decode in parallel — this dominates render time for clip-heavy projects.
+  const decoded = await Promise.all(
+    audible.map(async (clip) => {
+      try {
+        return { clip, buffer: await loadClipBuffer(ctx, clip.url) };
+      } catch {
+        return { clip, buffer: null as AudioBuffer | null };
+      }
+    }),
+  );
+
+  for (const { clip, buffer } of decoded) {
+    if (!buffer) {
+      failed.push(clip);
+      continue;
+    }
+    // clamp the clip into the render window without shifting its content
+    const headTrim = Math.max(0, windowStart - clip.start);
+    const tailTrim = Math.max(0, clipEnd(clip) - windowEnd);
+    const duration = clip.duration - headTrim - tailTrim;
+    if (duration <= 0.02) continue;
+
+    scheduleClip(master, clip, buffer, {
+      at: clip.start + headTrim - windowStart,
+      offset: clip.offset + headTrim,
+      duration,
+    });
+    placed.push(clip);
+  }
+
+  return { placed, failed };
 }
 
 /* -------------------------------------------------- post processing --- */
@@ -292,7 +357,7 @@ function finalizeMaster(buffer: AudioBuffer, ceilingDb: number, targetLufs: numb
   return { chans, lufs, peakDb };
 }
 
-function encodeWav(chans: Float32Array[], sampleRate: number, bitDepth: 16 | 24): Blob {
+export function encodeWav(chans: Float32Array[], sampleRate: number, bitDepth: 16 | 24): Blob {
   const numCh = chans.length;
   const len = chans[0].length;
   const bytesPer = bitDepth / 8;
@@ -376,6 +441,11 @@ export async function renderScore(
   const master = buildMaster(ctx, masterParams, 'render');
   schedule(ctx, master, scenes, total - 2.5);
 
+  // Generated clips ride the same master chain as the procedural voices.
+  const windowStart = offset;
+  const windowEnd = offset + span;
+  const clipResult = await scheduleClips(ctx, master, project.clips ?? [], windowStart, windowEnd);
+
   opts.onProgress?.(8);
   const buffer = await ctx.startRendering();
   opts.onProgress?.(70);
@@ -393,6 +463,48 @@ export async function renderScore(
     lufs,
     seconds: buffer.duration,
     bytes: blob.size,
+    clipsPlaced: clipResult.placed.length,
+    clipsFailed: clipResult.failed.map((c) => c.name),
+  };
+}
+
+/**
+ * Render a single generated clip in isolation.
+ *
+ * Same chain, same limiter — so a clip stem and the same clip inside the full
+ * master are consistent with each other.
+ */
+export async function renderClipStem(
+  clip: AudioClip,
+  masterParams: MasterParams,
+  sampleRate = 48000,
+): Promise<RenderResult> {
+  const OfflineCtor: typeof OfflineAudioContext =
+    window.OfflineAudioContext ||
+    (window as unknown as { webkitOfflineAudioContext: typeof OfflineAudioContext }).webkitOfflineAudioContext;
+
+  const total = clip.duration + 1.5;
+  const ctx = new OfflineCtor(2, Math.ceil(total * sampleRate), sampleRate);
+  const master = buildMaster(ctx, masterParams, 'render');
+
+  const solo: AudioClip = { ...clip, start: 0, muted: false, solo: false };
+  const result = await scheduleClips(ctx, master, [solo], 0, total);
+  if (result.placed.length === 0) {
+    throw new Error(`could not decode audio for "${clip.name}"`);
+  }
+
+  const buffer = await ctx.startRendering();
+  const { chans, lufs, peakDb } = finalizeMaster(buffer, masterParams.ceiling, null);
+  const blob = encodeWav(chans, sampleRate, 24);
+  return {
+    blob,
+    url: URL.createObjectURL(blob),
+    peakDb,
+    lufs,
+    seconds: buffer.duration,
+    bytes: blob.size,
+    clipsPlaced: 1,
+    clipsFailed: [],
   };
 }
 

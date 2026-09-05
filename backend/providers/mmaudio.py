@@ -1,221 +1,96 @@
-"""
-MMAudio Provider
+"""MMAudio provider — video-conditioned Foley.
 
-Integrates MMAudio for video-to-audio generation.
-MMAudio generates synchronized audio based on video content.
+Given a video selection, MMAudio produces audio synchronised to what is on
+screen: footsteps, cloth movement, impacts on contact frames. This is the
+provider Umbra routes *physical, picture-locked* sound to.
+
+Attribution note: MMAudio is Umbra's own independent open-source choice for
+video-conditioned Foley. It is not a claim about any other product's internals.
+
+This adapter is scaffolded and reports itself as not installed until the
+weights and package are genuinely present — it never fabricates a result.
 """
 
-import os
-import uuid
+from __future__ import annotations
+
 import logging
-import subprocess
-from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from .base import AudioProvider
-from ..schemas.providers import ProviderCapability, DeviceType, ProviderStatus
-from ..schemas.generation import GenerationRequest, GeneratedAudio, GenerationProvider
+from backend.providers.base import (
+    AudioProvider,
+    Capability,
+    GenerationRequest,
+    GenerationResult,
+    ProviderError,
+    ProviderRole,
+    ProviderStatus,
+)
+from backend.services import model_manager
+from backend.services.audio_store import AudioStore, get_audio_store
+from backend.services.device import preferred_device
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger("umbra.mmaudio")
+
+CHECKPOINT_DIR_NAME = "mmaudio"
 
 
 class MMAudioProvider(AudioProvider):
-    """
-    MMAudio video-to-audio provider.
-    
-    Generates audio synchronized to video content.
-    Model: MMAudio
-    
-    Capabilities:
-    - VIDEO_TO_AUDIO: Generate audio from video
-    - FOLEY: Sound effects
-    - AMBIENCE: Ambient sounds
-    """
-    
-    name = "mmaudio"
-    display_name = "MMAudio"
-    description = "Video-conditioned audio generation synchronized to video content"
-    capabilities = [
-        ProviderCapability.VIDEO_TO_AUDIO,
-        ProviderCapability.FOLEY,
-        ProviderCapability.AMBIENCE,
-    ]
-    
-    MODEL_REPO = "MMAudio/MMAudio"
-    
-    def __init__(self):
-        super().__init__()
-        self._device = DeviceType.CPU
-        self._model = None
-        self._model_name = "MMAudio"
-    
-    def _get_model_name(self) -> Optional[str]:
-        return self._model_name
-    
-    def is_installed(self) -> bool:
-        """Check if MMAudio dependencies are installed."""
-        try:
-            import torch
-            import transformers
-            return True
-        except ImportError:
-            return False
-    
-    async def is_available(self) -> bool:
-        """Check if the provider can generate."""
-        if not self.is_installed():
-            return False
-        return self._loaded
-    
-    def _detect_device(self) -> DeviceType:
-        """Detect the best available device."""
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return DeviceType.CUDA
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                return DeviceType.MPS
-        except (ImportError, AttributeError):
-            pass
-        return DeviceType.CPU
-    
-    async def _load_model(self) -> bool:
-        """Load the MMAudio model."""
-        try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoProcessor
-            
-            self._device = self._detect_device()
-            logger.info(f"Loading MMAudio on {self._device}")
-            
-            device_str = "cuda" if self._device == DeviceType.CUDA else \
-                         "mps" if self._device == DeviceType.MPS else "cpu"
-            
-            # Note: MMAudio has specific model loading requirements
-            # Using a placeholder - actual implementation would use the real model
-            # self._model = AutoModelForCausalLM.from_pretrained(
-            #     self.MODEL_REPO,
-            #     torch_dtype=torch.float16 if self._device != DeviceType.CPU else torch.float32,
-            # )
-            # self._processor = AutoProcessor.from_pretrained(self.MODEL_REPO)
-            
-            # For now, mark as loaded if dependencies are present
-            logger.info("MMAudio dependencies loaded")
-            return True
-            
-        except ImportError as e:
-            logger.error(f"Missing dependencies for MMAudio: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to load MMAudio: {e}")
-            return False
-    
-    async def _unload_model(self) -> None:
-        """Unload the model from memory."""
-        if self._model is not None:
-            del self._model
-            self._model = None
-        
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-    
-    async def generate(
-        self,
-        request: GenerationRequest,
-        output_dir: str,
-    ) -> list[GeneratedAudio]:
-        """
-        Generate audio from video using MMAudio.
-        
-        Args:
-            request: Generation parameters including video source
-            output_dir: Directory to save generated audio
-            
-        Returns:
-            List of GeneratedAudio objects
-        """
-        if not self.is_installed():
-            raise RuntimeError("MMAudio dependencies not installed")
-        
-        if not self._loaded:
-            raise RuntimeError("MMAudio model not loaded")
-        
-        if not request.source_video:
-            raise ValueError("MMAudio requires a source video")
-        
-        import subprocess
-        import numpy as np
-        
-        results = []
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Extract video range if specified
-        video_path = request.source_video
-        temp_video = None
-        
-        if request.source_range_start is not None and request.source_range_end is not None:
-            temp_video = output_path / f"temp_{uuid.uuid4().hex[:8]}.mp4"
-            try:
-                subprocess.run([
-                    "ffmpeg", "-y",
-                    "-i", video_path,
-                    "-ss", str(request.source_range_start),
-                    "-to", str(request.source_range_end),
-                    "-c:v", "libx264",
-                    "-an",  # Remove audio for clean input
-                    str(temp_video)
-                ], check=True, capture_output=True)
-                video_path = str(temp_video)
-                duration = request.source_range_end - request.source_range_start
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to extract video range: {e}")
-                raise RuntimeError(f"Video extraction failed: {e}")
-        
-        try:
-            # Placeholder for actual MMAudio generation
-            # Real implementation would:
-            # 1. Load video frames
-            # 2. Extract video features
-            # 3. Generate audio conditioned on video
-            # 4. Return audio buffer
-            
-            # For now, create a placeholder result
-            result_id = f"mma_{uuid.uuid4().hex[:12]}"
-            filepath = output_path / f"{result_id}.wav"
-            
-            # Note: This is where the real MMAudio inference would happen
-            # For demonstration, we'll indicate this is a placeholder
-            logger.info(
-                f"MMAudio placeholder: video={request.source_video[:50]}... "
-                f"range={request.source_range_start}-{request.source_range_end}"
+    id = "mmaudio"
+    label = "MMAudio"
+    blurb = "Video → synchronized audio"
+    role = ProviderRole.VIDEO_FOLEY
+    install_hint = "python scripts/setup_models.py --mmaudio"
+
+    def __init__(self, store: Optional[AudioStore] = None):
+        self.store = store or get_audio_store()
+
+    def _local_path(self):
+        p = model_manager.checkpoints_root() / CHECKPOINT_DIR_NAME
+        return p if p.is_dir() and any(p.iterdir()) else None
+
+    def status(self) -> ProviderStatus:
+        local = self._local_path()
+        pkg = model_manager.package_installed("mmaudio")
+        ready = bool(local and pkg and model_manager.package_installed("torch"))
+        device = preferred_device()
+
+        notes: List[str] = []
+        if not pkg:
+            notes.append("mmaudio package not installed")
+        if not local:
+            notes.append("Weights not downloaded")
+        if ready:
+            notes.append("Needs a video selection — generates picture-locked Foley")
+
+        return ProviderStatus(
+            id=self.id,
+            label=self.label,
+            blurb=self.blurb,
+            role=self.role,
+            installed=bool(local and pkg),
+            ready=ready,
+            capabilities=(
+                [Capability.VIDEO_CONDITIONED, Capability.SFX_GENERATION, Capability.SEED_CONTROL]
+                if ready
+                else []
+            ),
+            device=device.id if ready else None,
+            device_detail=device.detail if ready else None,
+            model="mmaudio" if local else None,
+            size_bytes=model_manager.dir_size(local) if local else None,
+            notes=notes,
+            install_hint=self.install_hint,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        if not self.status().ready:
+            raise ProviderError(
+                "MMAudio is not installed. Video-conditioned Foley is unavailable.",
+                http_status=503,
+                hint=self.install_hint,
             )
-            
-            result = GeneratedAudio(
-                id=result_id,
-                filepath=str(filepath),
-                duration=request.duration,
-                sample_rate=48000,
-                channels=2,
-                provider=GenerationProvider.MMAUDIO,
-                model=self._model_name,
-                prompt=request.prompt,
-                metadata={
-                    "source_video": request.source_video,
-                    "source_range_start": request.source_range_start,
-                    "source_range_end": request.source_range_end,
-                    "note": "MMAudio inference placeholder - integrate real model for actual generation",
-                },
-            )
-            results.append(result)
-            
-        finally:
-            # Clean up temp video
-            if temp_video and temp_video.exists():
-                temp_video.unlink()
-        
-        return results
+        raise ProviderError(
+            "MMAudio inference is not wired up in this build yet — install the model and "
+            "the adapter will drive it. Umbra will not return placeholder audio.",
+            http_status=501,
+        )
