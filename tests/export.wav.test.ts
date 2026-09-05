@@ -45,7 +45,13 @@ describe('plain PCM WAV', () => {
     const chans = [ramp(1200, 0.75)];
     const p24 = parseWave(encodeWaveBytes(chans, SR, { bitDepth: 24 }));
     const d24 = decodeWaveSamples(encodeWaveBytes(chans, SR, { bitDepth: 24 }), p24)[0];
-    for (let i = 0; i < 1200; i++) expect(Math.abs(d24[i] - chans[0][i])).toBeLessThan(2 ** -23 + 1e-9);
+    // seeded TPDF at the LSB: error bounded by one LSB + rounding, deterministic
+    // TPDF dither spans ±1 LSB, round adds ½ → bound is 1.5 LSB (plus float32
+    // representation of the source value); assert ≤2 LSB, never more.
+    const LSB = 2 ** -23;
+    let maxErr = 0;
+    for (let i = 0; i < 1200; i++) maxErr = Math.max(maxErr, Math.abs(d24[i] - chans[0][i]));
+    expect(maxErr).toBeLessThanOrEqual(2 * LSB);
 
     const bytesA = encodeWaveBytes(chans, SR, { bitDepth: 16 });
     const bytesB = encodeWaveBytes(chans, SR, { bitDepth: 16 });

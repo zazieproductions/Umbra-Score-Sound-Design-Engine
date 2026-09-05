@@ -168,7 +168,10 @@ export function encodeWaveBytes(chans: Float32Array[], sampleRate: number, opts:
       if (s > 1) s = 1;
       else if (s < -1) s = -1;
       if (bitDepth === 24) {
-        const v = Math.round(s * MAX24);
+        // TPDF dither at the LSB — same seeded rule as render.ts encodeWav,
+        // so a stem and a master bounce encoded from identical audio agree.
+        const dither = (rnd() + rnd() - 1) / MAX24;
+        const v = Math.max(-MAX24, Math.min(MAX24, Math.round((s + dither) * MAX24)));
         bytes[off] = v & 0xff;
         bytes[off + 1] = (v >> 8) & 0xff;
         bytes[off + 2] = (v >> 16) & 0xff;

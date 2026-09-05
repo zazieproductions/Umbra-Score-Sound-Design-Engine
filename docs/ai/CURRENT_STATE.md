@@ -48,11 +48,13 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 121 (`npm test`) — 19 retrieval acceptance + 6 architecture
-  invariants + 20 quality-measurement units + 4 rendered audio-QA gates
-  (headless Web Audio via `node-web-audio-api`; they skip, not fail, when the
-  addon cannot load) + 72 export-delivery (clock 6, stemPlan 27, kernel
-  A/B/C/G 8, WAV/BWF 10, manifest 6, preflight+ZIP 10, loudness/boundaries 5).
+- Frontend: 123 (`npm test`) — 19 retrieval acceptance + 6 architecture
+  invariants + 20 quality-measurement units + 6 rendered gates exercising the
+  real engine through headless Web Audio (4 audio-QA + 2 stem-delivery
+  equivalence: shared frameCount + Σ-stems-null on genuine convolvers;
+  `node-web-audio-api`, skip-not-fail when the addon cannot load) +
+  72 export-delivery (clock 6, stemPlan 27, kernel A/B/C/G 8, WAV/BWF 10,
+  manifest 6, preflight+ZIP 10, loudness/boundaries 5).
 - Backend: 66 (`pytest backend/tests -q`), no downloads
 - `tsc -b` clean · `eslint` clean · `vite build` clean
 
