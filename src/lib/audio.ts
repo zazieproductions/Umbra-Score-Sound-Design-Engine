@@ -297,7 +297,7 @@ export class ScoreEngine {
         while (entry.nextEvent < horizon && guard++ < 8) {
           const at = Math.max(entry.nextEvent, now + 0.03);
           voice.fire(at, 0.42 + layer.intensity * 0.58, layer);
-          entry.nextEvent = at + voice.interval(layer, this.tension);
+          entry.nextEvent = at + voice.interval(layer, this.tension, at);
         }
       }
       this.raf = requestAnimationFrame(tick);
@@ -346,11 +346,11 @@ export class ScoreEngine {
     if (voice.fire) {
       voice.fire(now + 0.08, 0.9, clean);
       if (voice.interval) {
-        let t = now + 0.08 + voice.interval(clean, 0.75);
+        let t = now + 0.08 + voice.interval(clean, 0.75, now + 0.08);
         let guard = 0;
         while (t < now + dur - 0.4 && guard++ < 24) {
           voice.fire(t, 0.75, clean);
-          t += voice.interval(clean, 0.75);
+          t += voice.interval(clean, 0.75, t);
         }
       }
     }

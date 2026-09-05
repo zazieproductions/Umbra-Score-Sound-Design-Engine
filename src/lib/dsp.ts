@@ -35,9 +35,9 @@ export const DEFAULT_MASTER: MasterParams = {
   volume: 0.95,
   drive: 0.34,
   width: 1.3,
-  glue: 0.6,
+  glue: 0.5,
   ceiling: -1,
-  subBoost: 0.66,
+  subBoost: 0.55,
   ducking: 0.55,
   roomMix: 0.28,
   hallMix: 0.34,
@@ -66,15 +66,99 @@ export function driveCurve(drive: number): Float32Array<ArrayBuffer> {
   return c;
 }
 
-/** Full-wave rectifier — generates an octave-up harmonic for sub reinforcement. */
+/**
+ * Full-wave rectifier — generates an octave-up harmonic for sub
+ * reinforcement on small speakers.
+ *
+ * Maps silence to silence: the curve is a true |x| rectifier, so an idle
+ * sub bus contributes no DC step. (The old |x|*2 - 1 mapping folded an idle
+ * 0 V input up to -1 V full-scale DC, which thumped through the following
+ * 95 Hz highpass as a subsonic pop at the start of every render.) The small
+ * DC a *signal*'s |x| still carries is removed by that highpass downstream.
+ * The octave-up fundamental is 6 dB lower than the offset variant (its
+ * Fourier series is half of |x|*2-1's), so the octave gain downstream is
+ * doubled to keep the reinforcement level.
+ */
 export function rectifyCurve(): Float32Array<ArrayBuffer> {
   const n = 1024;
   const c = f32(n);
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * 2 - 1;
-    c[i] = Math.abs(x) * 2 - 1;
+    c[i] = Math.abs(x);
   }
   return c;
+}
+
+/* ------------------------------------------------- band-limited voices --- */
+
+/**
+ * How many harmonics fit under Nyquist for a fundamental at `freq`.
+ * A naive oscillator with more partials than this would fold them back
+ * into the audible band as inharmonic aliasing; the helper below caps
+ * them so sustained pitched material stays clean.
+ */
+export function bandlimitedPartials(freq: number, sampleRate: number, maxPartials: number): number {
+  if (!(freq > 0)) return 1;
+  return Math.max(1, Math.min(maxPartials, Math.floor(sampleRate / 2 / freq) - 1));
+}
+
+/**
+ * Build a PeriodicWave whose Fourier series matches an ideal sawtooth /
+ * square / triangle, truncated at Nyquist. PeriodicWave normalisation
+ * keeps the peak near unity, so these drop in where a raw oscillator was.
+ */
+export function makeBandlimitedWave(
+  ctx: BaseAudioContext,
+  type: 'sawtooth' | 'square' | 'triangle',
+  freq: number,
+  maxPartials = 96,
+): PeriodicWave {
+  const n = bandlimitedPartials(freq, ctx.sampleRate, maxPartials);
+  const real = new Float32Array(n + 1);
+  const imag = new Float32Array(n + 1);
+  for (let k = 1; k <= n; k++) {
+    let a = 0;
+    if (type === 'sawtooth') {
+      a = 2 / (Math.PI * k);
+    } else if (type === 'square') {
+      a = k % 2 === 1 ? 4 / (Math.PI * k) : 0;
+    } else {
+      a = k % 2 === 1 ? (8 / (Math.PI * Math.PI * k * k)) * (k % 4 === 1 ? 1 : -1) : 0;
+    }
+    imag[k] = a;
+  }
+  return ctx.createPeriodicWave(real, imag);
+}
+
+export interface BandlimitedVoice {
+  osc: OscillatorNode;
+  /** Retune (with optional glide); rebuilds the wave only when the target moved >1%. */
+  tune(target: number, when: number, glide: number): void;
+}
+
+export function bandlimitedOsc(
+  ctx: BaseAudioContext,
+  type: 'sawtooth' | 'square' | 'triangle',
+  freq: number,
+  maxPartials = 96,
+): BandlimitedVoice {
+  const osc = ctx.createOscillator();
+  let builtFreq = freq;
+  osc.setPeriodicWave(makeBandlimitedWave(ctx, type, freq, maxPartials));
+  osc.frequency.value = freq;
+  const tune = (target: number, when: number, glide: number) => {
+    if (Math.abs(target - builtFreq) / builtFreq > 0.01) {
+      builtFreq = target;
+      try {
+        osc.setPeriodicWave(makeBandlimitedWave(ctx, type, target, maxPartials));
+      } catch {
+        /* some engines reject re-setting a wave mid-flight; keep the old one */
+      }
+    }
+    if (glide > 0) osc.frequency.setTargetAtTime(target, when, glide);
+    else osc.frequency.setValueAtTime(target, when);
+  };
+  return { osc, tune };
 }
 
 /** Seeded pink-ish noise, stereo, decorrelated channels. */
@@ -216,15 +300,25 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   duckGain.connect(sum);
   hitSum.connect(sum);
 
+  /*
+   * Working headroom. A full procedural stack (drone + sub + ambience + …
+   * through the sub bus and three reverbs) can sum close to full scale on its
+   * own; padding the mix down before the dynamics stage keeps the glue/tape/
+   * limiter stages out of the flat-top region and leaves real room for the
+   * loudness stage. This is gain *staging*, not a limiter: it scales every
+   * layer equally, so relative balance and dynamics are untouched.
+   */
+  const headroom = gainNode(ctx, dbToGain(-6));
+
   /* --- sub bus: lowpass + rectified octave + resonance + drive --------- */
   const subBus = gainNode(ctx, 1);
   const subLP = biquad(ctx, 'lowpass', 118, 0.9);
-  const subHP = biquad(ctx, 'highpass', 22, 0.7);
+  const subHP = biquad(ctx, 'highpass', 24, 0.7);
   const subDrive = ctx.createWaveShaper();
   subDrive.curve = driveCurve(0.35);
   subDrive.oversample = '4x';
   const subGain = gainNode(ctx, 1);
-  const subRes = biquad(ctx, 'peaking', 46, 0.7, 2.5); // resonant weight
+  const subRes = biquad(ctx, 'peaking', 46, 0.9, 2.5); // resonant weight (tamed by setParams)
   subBus.connect(subLP);
   subLP.connect(subHP);
   subHP.connect(subDrive);
@@ -237,7 +331,7 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   const oct = ctx.createWaveShaper();
   oct.curve = rectifyCurve();
   const octHP = biquad(ctx, 'highpass', 95, 0.8);
-  const octGain = gainNode(ctx, 0.2);
+  const octGain = gainNode(ctx, 0.4); // doubles the offset-free rectifier (see rectifyCurve)
   subBus.connect(octBP);
   octBP.connect(oct);
   oct.connect(octHP);
@@ -348,6 +442,11 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   limiter.attack.value = 0.0012;
   limiter.release.value = 0.055;
 
+  // Final DC / subsonic hygiene: a 12 Hz highpass removes any residual DC
+  // or inaudible low-end pile-up before the brickwall. Inaudible to the
+  // score, but it keeps the limiter and downstream codecs honest.
+  const dcBlock = biquad(ctx, 'highpass', 12, 0.707);
+
   const out = gainNode(ctx, p.volume);
   const spec = ctx.createAnalyser();
   spec.fftSize = 512;
@@ -355,20 +454,23 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
   const loud = ctx.createAnalyser();
   loud.fftSize = 2048;
 
-  sum.connect(dynamics);
+  sum.connect(headroom);
+  headroom.connect(dynamics);
   dynamics.connect(glue);
   glue.connect(satIn);
   satMix.connect(lowShelf);
   lowShelf.connect(mudCut);
   mudCut.connect(airShelf);
   airShelf.connect(split);
-  merge.connect(limiter);
+  merge.connect(dcBlock);
+  dcBlock.connect(limiter);
   limiter.connect(out);
   out.connect(spec);
   out.connect(loud);
   out.connect(ctx.destination);
 
   let duckLevel = 1;
+  let curveDrive = p.drive;
 
   const setParams = (patch: Partial<MasterParams>, when: number, glide: number) => {
     Object.assign(p, patch);
@@ -379,14 +481,17 @@ export function buildMaster(ctx: BaseAudioContext, params: MasterParams, quality
     set(out.gain, p.volume);
     set(satWet.gain, p.drive * 0.62);
     set(satDry.gain, 1 - p.drive * 0.32);
-    if (patch.drive !== undefined) shaper.curve = driveCurve(p.drive);
+    if (patch.drive !== undefined && patch.drive !== curveDrive) {
+      curveDrive = p.drive;
+      shaper.curve = driveCurve(p.drive);
+    }
     set(sideW.gain, p.width);
-    set(glue.threshold, -8 - p.glue * 22);
-    set(glue.ratio, 1.4 + p.glue * 3.2);
+    set(glue.threshold, -12 - p.glue * 14);
+    set(glue.ratio, 1.3 + p.glue * 2.6);
     set(limiter.threshold, p.ceiling - 0.4);
-    set(subGain.gain, 0.55 + p.subBoost * 1.15);
-    set(subRes.gain, p.subBoost * 5);
-    set(octGain.gain, p.subBoost * 0.32);
+    set(subGain.gain, 0.5 + p.subBoost * 0.95);
+    set(subRes.gain, p.subBoost * 3);
+    set(octGain.gain, p.subBoost * 0.6);
     set(room.ret.gain, p.roomMix * 0.95);
     set(hall.ret.gain, p.hallMix * 0.95);
     set(cath.ret.gain, p.cathMix * 0.9);
@@ -450,7 +555,7 @@ export interface Channel {
   dispose(): void;
 }
 
-export function buildChannel(m: MasterChain, kind: LayerKind): Channel {
+export function buildChannel(m: MasterChain, kind: LayerKind, seed = 0): Channel {
   const ctx = m.ctx;
   const input = gainNode(ctx, 1);
   const hp = biquad(ctx, 'highpass', 24, 0.7);
@@ -461,9 +566,11 @@ export function buildChannel(m: MasterChain, kind: LayerKind): Channel {
   const meter = ctx.createAnalyser();
   meter.fftSize = 256;
 
-  // Haas decorrelation path for immersive width on sustained material
+  // Haas decorrelation path for immersive width on sustained material.
+  // Seeded so the monitor and the bounce build the identical delay offset.
+  const haasRnd = mulberry32(seed >>> 0);
   const wideDelay = ctx.createDelay(0.05);
-  wideDelay.delayTime.value = 0.009 + Math.random() * 0.012;
+  wideDelay.delayTime.value = 0.009 + haasRnd() * 0.012;
   const wideGain = gainNode(ctx, 0);
   const widePan = ctx.createStereoPanner();
   const wideTilt = biquad(ctx, 'highpass', 220, 0.7);

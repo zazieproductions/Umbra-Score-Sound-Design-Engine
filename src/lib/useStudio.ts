@@ -22,6 +22,7 @@ import { soundClipToAudioClip } from './types';
 import { addLayer as makeLayer, analyzeProject, regenerateLayer } from './generate';
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
 import { download, renderClipStem, renderScore, renderStem } from './render';
+import { formatReport } from './quality';
 import { clipEnd, moveClip, splitClip, trimClip } from './clips';
 import { discardLatestSavedProject, hydrateClips, loadLatestSnapshot, persistProject } from './persistence';
 import { useGeneration } from './useGeneration';
@@ -1024,6 +1025,9 @@ export function useStudio() {
           opts?.filename ??
           `${project.name.replace(/\.[^.]+$/, '')}_${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.wav`;
         await new Promise((r) => setTimeout(r, 120));
+        const quality = result.quality
+          ? { verdict: result.quality.verdict, summary: formatReport(result.quality) }
+          : undefined;
         patchJob(id, {
           progress: 100,
           state: 'complete',
@@ -1032,12 +1036,17 @@ export function useStudio() {
           filename,
           peak: result.peakDb,
           lufs: result.lufs,
+          quality,
         });
         const clipNote = result.clipsPlaced ? ` · ${result.clipsPlaced} clip(s) baked in` : '';
         log(
           `render complete: ${filename} · ${result.seconds.toFixed(1)}s · peak ${result.peakDb.toFixed(1)} dBTP · ${result.lufs.toFixed(1)} LUFS${clipNote}`,
           'ok',
         );
+        if (quality) {
+          const level = quality.verdict === 'pass' ? 'ok' : quality.verdict === 'warn' ? 'warn' : 'warn';
+          log(`quality ${quality.verdict.toUpperCase()}: ${quality.summary}`, level);
+        }
         if (result.clipsFailed?.length) {
           log(`render warning: could not decode ${result.clipsFailed.join(', ')} — omitted from the master`, 'warn');
         }

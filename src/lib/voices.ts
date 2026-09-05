@@ -1,5 +1,16 @@
 import { mulberry32 } from './prng';
-import { biquad, buildChannel, gainNode, driveCurve, BASS_KINDS, type Channel, type MasterChain } from './dsp';
+import {
+  biquad,
+  buildChannel,
+  gainNode,
+  driveCurve,
+  bandlimitedOsc,
+  bandlimitedPartials,
+  BASS_KINDS,
+  type BandlimitedVoice,
+  type Channel,
+  type MasterChain,
+} from './dsp';
 import { KIND_META, type Layer } from './types';
 
 /* ==================================================================== *
@@ -15,8 +26,9 @@ export interface Voice {
   update(l: Layer, tension: number, when: number, glide: number): void;
   /** schedule a one-shot; force 0..1 */
   fire?(when: number, force: number, l: Layer): void;
-  /** interval in seconds until the next scheduled event */
-  interval?(l: Layer, tension: number): number;
+  /** interval in seconds until the next scheduled event; `when` is the
+   *  last event time and makes the interval deterministic. */
+  interval?(l: Layer, tension: number, when?: number): number;
   start(when: number): void;
   stop(when: number): void;
   dispose(): void;
@@ -31,6 +43,18 @@ function semi(base: number, n: number) {
 
 function rootOf(l: Layer): number {
   return l.root || 55;
+}
+
+/**
+ * Deterministic per-event PRNG. Seed + event time → the same stream every
+ * pass, so an event's transient detail is identical in the monitor and the
+ * offline bounce (and reproducible across renders) without any shared,
+ * order-dependent state. Replaces Math.random() in the event voices.
+ */
+function eventRnd(l: Layer, when: number): () => number {
+  const t = Math.floor(when * 1000) >>> 0;
+  const s = (l.seed || 1) >>> 0;
+  return mulberry32((s ^ (t * 2654435761)) >>> 0);
 }
 
 function ramp(p: AudioParam, v: number, when: number, glide: number) {
@@ -80,7 +104,7 @@ function stopAll(started: { n: AudioScheduledSourceNode }[], when: number) {
 
 export function buildVoice(m: MasterChain, l: Layer): Voice {
   const ctx = m.ctx;
-  const ch = buildChannel(m, l.kind);
+  const ch = buildChannel(m, l.kind, l.seed || 1);
   const rnd = mulberry32(l.seed || 1);
   const started: { n: AudioScheduledSourceNode }[] = [];
 
@@ -98,12 +122,14 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
       const lp = biquad(ctx, 'lowpass', 900, 2.2);
       const body = biquad(ctx, 'peaking', 180, 1.1, 3.5);
       const oscs: OscillatorNode[] = [];
+      const waves: BandlimitedVoice[] = [];
       const detunes: OscillatorNode[] = [];
       const lfos: OscillatorNode[] = [];
+      const droneRoot = rootOf(l);
 
       WIDE.forEach((iv, i) => {
-        const o = ctx.createOscillator();
-        o.type = i % 2 ? 'sawtooth' : 'triangle';
+        const { osc: o, tune } = bandlimitedOsc(ctx, i % 2 ? 'sawtooth' : 'triangle', semi(droneRoot, iv));
+        waves.push({ osc: o, tune });
         const det = ctx.createOscillator();
         det.frequency.value = 0.05 + rnd() * 0.12;
         const detAmt = gainNode(ctx, 3 + rnd() * 8);
@@ -158,7 +184,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         ch,
         update(x, tension, when, glide) {
           const root = rootOf(x);
-          oscs.forEach((o, i) => ramp(o.frequency, semi(root, WIDE[i]), when, glide));
+          waves.forEach((w, i) => w.tune(semi(root, WIDE[i]), when, glide));
           ramp(sub.frequency, root / 2, when, glide);
           ramp(shimmer.frequency, root * 4, when, glide);
           ramp(lp.frequency, 300 + x.tone * 1800 + x.intensity * 800 + tension * 600, when, glide);
@@ -363,6 +389,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
     case 'strings': {
       const bus = gainNode(ctx, 1);
       const oscs: OscillatorNode[] = [];
+      const waves: BandlimitedVoice[] = [];
       const mods: OscillatorNode[] = [];
       const sections = [
         { iv: -12, n: 3, pan: -0.55 },
@@ -370,6 +397,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         { iv: 12, n: 3, pan: 0.22 },
         { iv: 24, n: 2, pan: 0.55 },
       ];
+      const stringRoot = rootOf(l);
       sections.forEach((sec) => {
         const secLp = biquad(ctx, 'lowpass', 4200, 0.8); // bow warmth
         const trem = ctx.createOscillator();
@@ -386,8 +414,8 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         secPan.connect(bus);
         mods.push(trem);
         for (let j = 0; j < sec.n; j++) {
-          const o = ctx.createOscillator();
-          o.type = 'sawtooth';
+          const { osc: o, tune } = bandlimitedOsc(ctx, 'sawtooth', semi(stringRoot, sec.iv));
+          waves.push({ osc: o, tune });
           o.detune.value = (j - (sec.n - 1) / 2) * 7 + (rnd() * 4 - 2);
           const vib = ctx.createOscillator();
           vib.frequency.value = 4.6 + rnd() * 1.6;
@@ -423,7 +451,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           const root = rootOf(x);
           let k = 0;
           sections.forEach((sec) => {
-            for (let j = 0; j < sec.n; j++) ramp(oscs[k++].frequency, semi(root, sec.iv), when, glide);
+            for (let j = 0; j < sec.n; j++) waves[k++].tune(semi(root, sec.iv), when, glide);
           });
           ramp(bp.frequency, 1000 + x.tone * 2600 + tension * 700, when, glide);
           ramp(bp.Q, 0.8 + x.intensity * 2.4, when, glide);
@@ -431,14 +459,16 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           ramp(dry.gain, 1 - x.intensity * 0.4, when, glide);
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x, tension) => 6 + Math.random() * 8 - x.intensity * 3 - tension * 2,
+        interval: (x, tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 6 + r() * 8 - x.intensity * 3 - tension * 2;
+        },
         fire(when, force) {
           // spiccato ostinato stab
+          const r = eventRnd(cur, when);
           const root = rootOf(cur) * 2;
           [0, 7, 12, 19].forEach((iv, i) => {
-            const o = ctx.createOscillator();
-            o.type = 'sawtooth';
-            o.frequency.setValueAtTime(semi(root, iv), when);
+            const { osc: o } = bandlimitedOsc(ctx, 'sawtooth', semi(root, iv));
             const lp = biquad(ctx, 'lowpass', 3200, 0.9);
             const g = gainNode(ctx, 0);
             const amp = (0.16 / (1 + i * 0.3)) * force;
@@ -462,7 +492,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           n.connect(hp);
           hp.connect(ng);
           ng.connect(ch.input);
-          n.start(when, Math.random() * 3);
+          n.start(when, r() * 3);
           n.stop(when + 0.05);
         },
         start(when) {
@@ -481,10 +511,12 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
     case 'choir': {
       const bus = gainNode(ctx, 1);
       const oscs: OscillatorNode[] = [];
+      const waves: BandlimitedVoice[] = [];
       const mods: OscillatorNode[] = [];
+      const choirRoot = rootOf(l);
       OPEN.forEach((iv, i) => {
-        const o = ctx.createOscillator();
-        o.type = i % 2 ? 'sawtooth' : 'triangle';
+        const { osc: o, tune } = bandlimitedOsc(ctx, i % 2 ? 'sawtooth' : 'triangle', semi(choirRoot, iv));
+        waves.push({ osc: o, tune });
         o.detune.value = (rnd() * 10 - 5);
         const det = ctx.createOscillator();
         det.frequency.value = 0.08 + rnd() * 0.1;
@@ -528,7 +560,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         ch,
         update(x, tension, when, glide) {
           const root = rootOf(x);
-          oscs.forEach((o, i) => ramp(o.frequency, semi(root, OPEN[i]), when, glide));
+          waves.forEach((w, i) => w.tune(semi(root, OPEN[i]), when, glide));
           ramp(formant[0].frequency, 380 + x.tone * 400, when, glide);
           ramp(formant[1].frequency, 900 + x.tone * 900, when, glide);
           ramp(formant[2].frequency, 2000 + x.tone * 1800, when, glide);
@@ -557,12 +589,16 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x, tension) => 0.22 + Math.random() * (2.1 - x.intensity * 1.2 - tension * 0.4),
+        interval: (x, tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 0.22 + r() * (2.1 - x.intensity * 1.2 - tension * 0.4);
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const atk = 0.001 + cur.attack * 0.02;
           // 1. click transient
           const click = noiseSrc();
-          click.playbackRate.value = 1.4 + Math.random();
+          click.playbackRate.value = 1.4 + r();
           const chp = biquad(ctx, 'highpass', 2400 + cur.tone * 3600, 0.8);
           const cg = gainNode(ctx, 0);
           cg.gain.setValueAtTime(0.0001, when);
@@ -571,29 +607,29 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           click.connect(chp);
           chp.connect(cg);
           cg.connect(ch.input);
-          click.start(when, Math.random() * 3);
+          click.start(when, r() * 3);
           click.stop(when + 0.09);
 
           // 2. body — resonant band
           const body = noiseSrc();
-          body.playbackRate.value = 0.5 + Math.random() * 1.3;
-          const bp = biquad(ctx, 'bandpass', 260 + cur.tone * 1600 + Math.random() * 500, 3 + Math.random() * 6);
+          body.playbackRate.value = 0.5 + r() * 1.3;
+          const bp = biquad(ctx, 'bandpass', 260 + cur.tone * 1600 + r() * 500, 3 + r() * 6);
           const bg = gainNode(ctx, 0);
-          const dur = 0.06 + Math.random() * 0.26 + cur.attack * 0.2;
+          const dur = 0.06 + r() * 0.26 + cur.attack * 0.2;
           bg.gain.setValueAtTime(0.0001, when);
           bg.gain.exponentialRampToValueAtTime(0.62 * force, when + atk + 0.004);
           bg.gain.exponentialRampToValueAtTime(0.0001, when + dur);
           body.connect(bp);
           bp.connect(bg);
           bg.connect(ch.input);
-          body.start(when, Math.random() * 3);
+          body.start(when, r() * 3);
           body.stop(when + dur + 0.06);
 
           // 3. low thud for weight
           const th = ctx.createOscillator();
           th.type = 'sine';
           const tg = gainNode(ctx, 0);
-          th.frequency.setValueAtTime(120 + Math.random() * 60, when);
+          th.frequency.setValueAtTime(120 + r() * 60, when);
           th.frequency.exponentialRampToValueAtTime(48, when + 0.14);
           tg.gain.setValueAtTime(0.0001, when);
           tg.gain.exponentialRampToValueAtTime(0.3 * force, when + 0.008);
@@ -616,6 +652,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
       ch.hp.frequency.value = 22;
       let cur = l;
       const beat = (when: number, amp: number, force: number) => {
+        const r = eventRnd(cur, when);
         // sub thump
         const o = ctx.createOscillator();
         o.type = 'sine';
@@ -640,7 +677,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         n.connect(lp);
         lp.connect(ng);
         ng.connect(ch.input);
-        n.start(when, Math.random() * 3);
+        n.start(when, r() * 3);
         n.stop(when + 0.2);
       };
       return {
@@ -674,9 +711,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
         },
         interval: (x, tension) => Math.max(0.09, 1.4 - (x.intensity * 0.85 + tension * 0.8) * 1.4),
         fire(when, force) {
-          const o = ctx.createOscillator();
-          o.type = 'square';
-          o.frequency.setValueAtTime(2100 + cur.tone * 2600, when);
+          const { osc: o } = bandlimitedOsc(ctx, 'square', 2100 + cur.tone * 2600);
           const bp = biquad(ctx, 'bandpass', 3200 + cur.tone * 3000, 6);
           const g = gainNode(ctx, 0);
           g.gain.setValueAtTime(0.0001, when);
@@ -719,8 +754,12 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 5.5 + Math.random() * 7 - x.intensity * 2.5,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 5.5 + r() * 7 - x.intensity * 2.5;
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const dur = 2.4 + cur.intensity * 2.6;
           const end = when + dur;
           const base = rootOf(cur);
@@ -736,16 +775,19 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           n.connect(bp);
           bp.connect(ng);
           ng.connect(ch.input);
-          n.start(when, Math.random() * 2);
+          n.start(when, r() * 2);
           n.stop(end + 0.6);
-          // shepard-ish pitch swell (3 stacked saws)
+          // shepard-ish pitch swell (3 stacked saws, band-limited across the
+          // whole sweep: the wave is capped at the partial count that still
+          // fits under Nyquist at the *top* of the ramp, so the rising
+          // fundamental brightens without folding partials back down)
           for (let k = 0; k < 3; k++) {
-            const o = ctx.createOscillator();
-            o.type = 'sawtooth';
-            const g = gainNode(ctx, 0);
             const b = base * Math.pow(2, k);
+            const top = b * (4 + cur.intensity * 4);
+            const { osc: o } = bandlimitedOsc(ctx, 'sawtooth', b, bandlimitedPartials(top, ctx.sampleRate, 96));
+            const g = gainNode(ctx, 0);
             o.frequency.setValueAtTime(b, when);
-            o.frequency.exponentialRampToValueAtTime(b * (4 + cur.intensity * 4), end);
+            o.frequency.exponentialRampToValueAtTime(top, end);
             g.gain.setValueAtTime(0.0001, when);
             g.gain.exponentialRampToValueAtTime(0.16 * force * (1 - k * 0.22), end - 0.1);
             g.gain.exponentialRampToValueAtTime(0.0001, end + 0.25);
@@ -788,15 +830,18 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 7 + Math.random() * 9 - x.intensity * 3,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 7 + r() * 9 - x.intensity * 3;
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const dur = 1.0 + cur.intensity * 1.4;
           const end = when + dur;
           const base = rootOf(cur);
           // pitch fall: stacked saws diving into the sub range
           [1, 1.5, 2].forEach((m, k) => {
-            const o = ctx.createOscillator();
-            o.type = 'sawtooth';
+            const { osc: o } = bandlimitedOsc(ctx, 'sawtooth', base * m);
             const g = gainNode(ctx, 0);
             o.frequency.setValueAtTime(base * m, when);
             o.frequency.exponentialRampToValueAtTime(base / 4, end);
@@ -824,7 +869,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           n.connect(bp);
           bp.connect(ng);
           ng.connect(ch.input);
-          n.start(when, Math.random() * 2);
+          n.start(when, r() * 2);
           n.stop(end + 0.35);
           // bloom through reverse verb + sub drop landing on the cut
           const pre = gainNode(ctx, 0.3 * force);
@@ -861,12 +906,16 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 3.5 + Math.random() * 6 - x.intensity * 2,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 3.5 + r() * 6 - x.intensity * 2;
+        },
         fire(when, force) {
-          const dur = 0.7 + Math.random() * 0.9;
-          const dir = Math.random() > 0.5 ? 1 : -1;
+          const r = eventRnd(cur, when);
+          const dur = 0.7 + r() * 0.9;
+          const dir = r() > 0.5 ? 1 : -1;
           const n = noiseSrc();
-          n.playbackRate.value = 0.8 + Math.random() * 0.7;
+          n.playbackRate.value = 0.8 + r() * 0.7;
           const bp = biquad(ctx, 'bandpass', 600, 1.4);
           bp.frequency.setValueAtTime(400, when);
           bp.frequency.exponentialRampToValueAtTime(2600 + cur.tone * 3400, when + dur * 0.55);
@@ -882,7 +931,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           bp.connect(pan);
           pan.connect(g);
           g.connect(ch.input);
-          n.start(when, Math.random() * 3);
+          n.start(when, r() * 3);
           n.stop(when + dur + 0.25);
         },
         start() {},
@@ -903,7 +952,10 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 6 + Math.random() * 9 - x.intensity * 3,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 6 + r() * 9 - x.intensity * 3;
+        },
         fire(when, force) {
           const dur = 1.8 + cur.intensity * 1.8;
           const root = rootOf(cur);
@@ -921,10 +973,9 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           lp.connect(pre);
           pre.connect(ch.m.reverseVerb);
 
-          // octave-down doubled partials for mass
+          // octave-down doubled partials for mass (band-limited, no fold-back)
           [-12, 0, 7, 12, 19].forEach((iv, i) => {
-            const o = ctx.createOscillator();
-            o.type = i % 2 ? 'sawtooth' : 'square';
+            const { osc: o } = bandlimitedOsc(ctx, i % 2 ? 'sawtooth' : 'square', semi(root, iv));
             o.frequency.setValueAtTime(semi(root, iv) * 0.985, when);
             o.frequency.linearRampToValueAtTime(semi(root, iv), when + 0.5);
             const g = gainNode(ctx, 0);
@@ -970,7 +1021,10 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 3.5 + Math.random() * 7 - x.intensity * 3,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 3.5 + r() * 7 - x.intensity * 3;
+        },
         fire(when, force) {
           const dur = 0.3 + cur.intensity * 0.4;
           const root = rootOf(cur);
@@ -984,8 +1038,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           rasp.connect(lp);
           lp.connect(ch.input);
           [0, 7, 12, 16].forEach((iv, i) => {
-            const o = ctx.createOscillator();
-            o.type = i % 2 ? 'sawtooth' : 'square';
+            const { osc: o } = bandlimitedOsc(ctx, i % 2 ? 'sawtooth' : 'square', semi(root, iv));
             // marcato pitch-dip attack
             o.frequency.setValueAtTime(semi(root, iv) * 0.94, when);
             o.frequency.exponentialRampToValueAtTime(semi(root, iv), when + 0.03);
@@ -1031,8 +1084,12 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 2.2 + Math.random() * 5 - x.intensity * 2,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 2.2 + r() * 5 - x.intensity * 2;
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const root = rootOf(cur);
           // deep taiko thump — pitch drop with long resonance
           const o = ctx.createOscillator();
@@ -1049,7 +1106,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           o.stop(when + 1.0);
           // skin slap — noise body
           const n = noiseSrc();
-          n.playbackRate.value = 0.7 + Math.random() * 0.5;
+          n.playbackRate.value = 0.7 + r() * 0.5;
           const lp = biquad(ctx, 'lowpass', 420 + cur.tone * 500, 1.4);
           const ng = gainNode(ctx, 0);
           ng.gain.setValueAtTime(0.0001, when);
@@ -1058,21 +1115,21 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           n.connect(lp);
           lp.connect(ng);
           ng.connect(ch.input);
-          n.start(when, Math.random() * 3);
+          n.start(when, r() * 3);
           n.stop(when + 0.4);
           // rim crack
-          const r = noiseSrc();
-          r.playbackRate.value = 1.5 + Math.random();
+          const rc = noiseSrc();
+          rc.playbackRate.value = 1.5 + r();
           const hp = biquad(ctx, 'highpass', 2600, 0.8);
           const rg = gainNode(ctx, 0);
           rg.gain.setValueAtTime(0.0001, when);
           rg.gain.exponentialRampToValueAtTime(0.28 * force, when + 0.003);
           rg.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
-          r.connect(hp);
+          rc.connect(hp);
           hp.connect(rg);
           rg.connect(ch.input);
-          r.start(when, Math.random() * 3);
-          r.stop(when + 0.08);
+          rc.start(when, r() * 3);
+          rc.stop(when + 0.08);
           duckFor(ch.m, cur, when);
         },
         start() {},
@@ -1093,8 +1150,12 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 7 + Math.random() * 10 - x.intensity * 3.5,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 7 + r() * 10 - x.intensity * 3.5;
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const root = rootOf(cur);
           // pre-thud — tiny anticipatory knock
           const th = ctx.createOscillator();
@@ -1136,7 +1197,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           bp.connect(dist);
           dist.connect(ng);
           ng.connect(ch.input);
-          n.start(when, Math.random() * 3);
+          n.start(when, r() * 3);
           n.stop(when + 0.7);
           // air burst — high splash
           const airN = noiseSrc();
@@ -1149,7 +1210,7 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           airN.connect(airHp);
           airHp.connect(airG);
           airG.connect(ch.input);
-          airN.start(when, Math.random() * 2);
+          airN.start(when, r() * 2);
           airN.stop(when + 0.3);
           // metallic ring-out (inharmonic)
           [1.0, 1.47, 2.09].forEach((r, i) => {
@@ -1186,8 +1247,12 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           cur = x;
           applyStrip(ch, x, tension, when, glide);
         },
-        interval: (x) => 4.5 + Math.random() * 8 - x.intensity * 3,
+        interval: (x, _tension, when) => {
+          const r = eventRnd(x, when ?? 0);
+          return 4.5 + r() * 8 - x.intensity * 3;
+        },
         fire(when, force) {
+          const r = eventRnd(cur, when);
           const root = rootOf(cur);
           // FM metallic crack
           const car = ctx.createOscillator();
@@ -1224,12 +1289,11 @@ export function buildVoice(m: MasterChain, l: Layer): Voice {
           const pre = gainNode(ctx, 0.4 * force);
           hp.connect(pre);
           pre.connect(ch.m.reverseVerb);
-          n.start(when, Math.random() * 2);
+          n.start(when, r() * 2);
           n.stop(when + 0.6);
 
           // sub drop underneath
-          const o = ctx.createOscillator();
-          o.type = 'sawtooth';
+          const { osc: o } = bandlimitedOsc(ctx, 'sawtooth', root * 1.8);
           const lp = biquad(ctx, 'lowpass', 1600, 1.2);
           lp.frequency.exponentialRampToValueAtTime(110, when + 0.8);
           const g2 = gainNode(ctx, 0);
