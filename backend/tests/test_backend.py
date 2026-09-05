@@ -452,3 +452,113 @@ def test_unavailable_providers_declare_no_capabilities(client):
         if not p["installed"]:
             assert p["capabilities"] == []
             assert p["installHint"], f"{p['id']} should tell the user how to install it"
+
+
+# ------------------------------------------- preserved analysis (video/waveform)
+
+
+def test_video_toolchain_reports_honestly():
+    """ffmpeg is an external binary — never claim it when it is absent."""
+    from backend.analysis.video import ffmpeg_available, toolchain_status
+
+    status = toolchain_status()
+    assert status["ffmpeg"]["available"] == ffmpeg_available()
+    if not status["ffmpeg"]["available"]:
+        assert status["ffmpeg"]["path"] is None
+        assert status["note"]
+
+
+def test_probe_video_degrades_without_ffprobe_or_file(tmp_path):
+    """A missing tool or file yields available=False, not an exception."""
+    from backend.analysis.video import probe_video
+
+    info = probe_video(tmp_path / "nope.mov")
+    assert info.available is False
+    assert info.message
+    assert info.duration == 0.0
+
+
+def test_extract_range_rejects_empty_span(tmp_path):
+    from backend.analysis.video import extract_range
+
+    result = extract_range(tmp_path / "in.mov", tmp_path / "out.mov", 5.0, 5.0)
+    assert result.ok is False
+    assert result.message
+
+
+def test_generate_peaks_returns_real_shape(tmp_path):
+    """Peaks must come from the decoded file, not a synthesised curve."""
+    from backend.analysis.waveform import generate_peaks
+
+    p = write_sine(tmp_path / "peaks.wav", seconds=1.0, sr=48000, channels=1)
+    result = generate_peaks(p, bins=64)
+
+    assert result.available is True
+    assert len(result.peaks) <= 64
+    assert result.sample_rate == 48000
+    assert result.duration == pytest.approx(1.0, abs=0.02)
+    # a 0.3 amplitude sine normalises to a peak of 1.0
+    assert max(result.peaks) == pytest.approx(1.0, abs=0.01)
+
+
+def test_analyze_features_measures_real_levels(tmp_path):
+    from backend.analysis.waveform import analyze_features
+
+    p = write_sine(tmp_path / "level.wav", seconds=1.0, sr=48000, channels=1)
+    f = analyze_features(p)
+
+    assert f.available is True
+    assert f.peak == pytest.approx(0.3, abs=0.01)
+    # RMS of a sine is amplitude / sqrt(2)
+    assert f.rms == pytest.approx(0.3 / math.sqrt(2), abs=0.01)
+    assert f.crest_factor == pytest.approx(math.sqrt(2), abs=0.05)
+    assert -12 < f.peak_db < -9
+
+
+def test_silence_detection_distinguishes_unknown_from_silent(tmp_path):
+    """None means 'could not measure' — never conflate that with silence."""
+    from backend.analysis.waveform import is_effectively_silent
+
+    assert is_effectively_silent(tmp_path / "missing.wav") is None
+
+    loud = write_sine(tmp_path / "loud.wav", seconds=0.5, sr=48000, channels=1)
+    assert is_effectively_silent(loud) is False
+
+
+def test_waveform_handles_undecodable_file(tmp_path):
+    from backend.analysis.waveform import analyze_features, generate_peaks
+
+    junk = tmp_path / "junk.wav"
+    junk.write_bytes(b"this is not audio at all")
+
+    assert generate_peaks(junk).available is False
+    assert analyze_features(junk).available is False
+
+
+def test_audio_feature_endpoints_reject_unknown_id(client):
+    assert client.get("/api/audio/does-not-exist/peaks").status_code == 404
+    assert client.get("/api/audio/does-not-exist/features").status_code == 404
+
+
+def test_toolchain_endpoint(client):
+    r = client.get("/api/analysis/toolchain")
+    assert r.status_code == 200
+    assert "ffmpeg" in r.json()
+
+
+def test_single_provider_api_no_duplicate_abstraction():
+    """
+    There must be exactly ONE provider base class and ONE registry.
+    PR #5's parallel schemas/AudioProvider layer was intentionally removed.
+    """
+    import backend
+
+    root = Path(backend.__file__).parent
+    assert not (root / "schemas").exists(), "backend/schemas must not return"
+    assert not (root / "services" / "jobs.py").exists(), "duplicate job manager must not return"
+    assert not (root / "providers" / "procedural_bridge.py").exists()
+    assert not (root / "providers" / "pyscenedetect.py").exists()
+
+    from backend.providers.base import AudioProvider
+
+    assert AudioProvider is not None

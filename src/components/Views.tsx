@@ -151,7 +151,7 @@ export function PipelineView({ studio }: { studio: Studio }) {
     { k: 'Shot segmentation', d: 'frame differential, flow clustering, cut refine', done: studio.readyCount > 0 },
     { k: 'Semantic tagging', d: 'CLIP scene labels, motion energy, tension curve', done: studio.readyCount > 1 },
     { k: 'Layer planning', d: 'assigns 6–9 layer classes, a musical key and a reverb space per scene', done: studio.readyCount > 1 },
-    { k: 'Orchestration & synthesis', d: 'CINEWORKS v5 · 32 steps · 48 kHz layered audio', done: !studio.analyzing },
+    { k: 'Orchestration & synthesis', d: 'Umbra procedural voices · 48 kHz layered Web Audio', done: !studio.analyzing },
     { k: 'Conform & master', d: 'glue comp → tape drive → M/S widen → true-peak limit', done: !studio.analyzing },
   ];
 

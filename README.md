@@ -80,9 +80,11 @@ backend/
     clap.py                 text↔audio embeddings and search
     prompting.py            horror-first prompt construction
   analysis/
-    scenes.py               shot detection (PySceneDetect)
-    spotting.py             music planner — structured musical intent
+    scenes.py               shot detection (PySceneDetect) + music planner
+    spotting.py             horror-first prompt construction
     embeddings.py           embedding index for library search
+    video.py                ffprobe metadata, thumbnails, range extraction
+    waveform.py             peak extraction, RMS/peak/crest measurement
   services/
     audio_store.py          content-addressed local audio store
     model_manager.py        checkpoint discovery, package probing
@@ -155,14 +157,25 @@ ACE-Step's runtime dependencies (torch, transformers, diffusers…) are separate
 Requires Python **3.11 or 3.12** (ACE-Step pins `>=3.11,<3.13`). Device selection is real:
 CUDA, Apple MPS/MLX, or CPU, detected via PyTorch. Umbra never displays hardware it cannot see.
 
+`ffmpeg` is optional but recommended — it is an external binary, not a Python package, and it
+enables video metadata, thumbnails and handing a video-conditioned provider just the span you
+selected. Without it those features report themselves unavailable rather than guessing.
+
 ### Scripts
 
 ```bash
 npm run dev      # dev server with HMR and the /api proxy
 npm run build    # tsc -b && vite build
 npm run lint     # eslint
-.venv/bin/python -m pytest backend/tests -q     # 42 tests
+.venv/bin/python -m pytest backend/tests -q     # 57 tests
+
+python scripts/verify_environment.py            # what's installed, what hardware exists
+python scripts/verify_environment.py --json     # same, machine-readable
 ```
+
+`verify_environment.py` is the fastest way to find out why a provider is showing as
+unavailable. It reports real packages, real devices and real checkpoints, then prints the next
+useful command.
 
 ---
 

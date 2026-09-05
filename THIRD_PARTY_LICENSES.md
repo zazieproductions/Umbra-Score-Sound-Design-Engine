@@ -90,6 +90,18 @@ The procedural synthesis engine (`src/lib/voices.ts`), the master/DSP chain
 repository's own licence. No ACE-Step model internals were reimplemented — Umbra calls the
 official package.
 
+## Attribution
+
+Several of these licences require attribution when you distribute a product built on them.
+MIT and BSD-3-Clause both require the copyright notice and permission text to travel with any
+redistribution; Apache-2.0 additionally requires you to state significant changes. CC0-1.0
+(LAION-CLAP's code) waives attribution, though crediting the authors remains good practice.
+
+If you ship a build of Umbra, reproduce the upstream `LICENSE` files for the components you
+actually bundle. Umbra downloads models and installs Python packages rather than vendoring
+them, so a source checkout of this repository does not itself redistribute the components
+listed above — but a packaged distribution might.
+
 ## Reporting a licensing problem
 
 If you believe something here is misattributed or missing, open an issue. Licence terms change;

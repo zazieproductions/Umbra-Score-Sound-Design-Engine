@@ -17,5 +17,8 @@ numpy>=1.24
 # Model download from official distribution channels.
 huggingface-hub>=0.24.0
 
+# Optional but recommended: ffprobe-based video metadata in analysis/video.py
+# needs the `ffmpeg` binary on PATH, not a Python package.
+
 # Tests
 pytest>=8.0

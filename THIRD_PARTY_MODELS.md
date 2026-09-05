@@ -101,6 +101,31 @@ that works with the Python backend switched off.
 
 ---
 
+## Checkpoint sizes
+
+Approximate on-disk footprint, so you can plan before downloading. `scripts/setup_models.py
+--list` reports the real figures once something is installed.
+
+| Model | Approx. size |
+| --- | --- |
+| ACE-Step 1.5 (turbo + VAE + Qwen3-Embedding-0.6B + 1.7B LM) | ~8–10 GB |
+| Stable Audio Open 1.0 | ~1.5 GB |
+| MMAudio | ~2 GB |
+| CLAP | ~1 GB |
+
+## Before you use any of these commercially
+
+1. **Read the individual model licence** at the linked source — not this table, which is a
+   summary and may go stale.
+2. **Check attribution requirements.** Several licences require crediting the original authors.
+3. **Check whether changes must be indicated**, and whether share-alike applies to derivatives.
+4. **Check revenue thresholds.** Stable Audio Open's community licence has one at US$1M.
+5. **Verify your specific use case.** "Available to download" is not "licensed for your
+   product".
+
+Umbra is built for personal and professional sound design work, but the licence obligations
+attach to *you* as the operator of the models, not to this repository.
+
 ## Where weights live
 
 ```

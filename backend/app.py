@@ -35,6 +35,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from backend.analysis import embeddings as embeddings_service
 from backend.analysis.scenes import detect_cuts, plan_project, plan_scene
 from backend.analysis.spotting import HORROR_PRESETS, build_prompt
+from backend.analysis.video import probe_video, toolchain_status
+from backend.analysis.waveform import analyze_features, generate_peaks
 from backend.providers.base import GenerationRequest, ProviderError
 from backend.providers.registry import get_registry, route_intent
 from backend.services import model_manager
@@ -330,3 +332,44 @@ async def analysis_cuts(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         min_scene_seconds=float(payload.get("minSceneSeconds", 1.5)),
     )
     return result.to_json()
+
+
+@app.post("/api/analysis/video")
+async def analysis_video(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Real container metadata via ffprobe, or an honest 'ffmpeg not found'."""
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    return probe_video(Path(path)).to_json()
+
+
+@app.get("/api/analysis/toolchain")
+async def analysis_toolchain() -> Dict[str, Any]:
+    """Which external video tools are actually on PATH."""
+    return toolchain_status()
+
+
+@app.get("/api/audio/{audio_id}/peaks")
+async def audio_peaks(audio_id: str, bins: int = Query(200, ge=16, le=2000)) -> Dict[str, Any]:
+    """Waveform peaks for a stored file.
+
+    The frontend normally draws from its own decoded AudioBuffer; this exists
+    for reference material the browser has not decoded.
+    """
+    path = app.state.store.path_for(audio_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"unknown audio id '{audio_id}'")
+    return generate_peaks(path, bins).to_json()
+
+
+@app.get("/api/audio/{audio_id}/features")
+async def audio_features(audio_id: str) -> Dict[str, Any]:
+    """Measured RMS / peak / crest for a stored file.
+
+    Real measurements — used to catch a silent or clipped generation result
+    rather than letting it reach the timeline unnoticed.
+    """
+    path = app.state.store.path_for(audio_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"unknown audio id '{audio_id}'")
+    return analyze_features(path).to_json()
