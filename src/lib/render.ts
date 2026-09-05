@@ -1,7 +1,7 @@
 import { buildMaster, type MasterParams } from './dsp';
 import { buildVoice } from './voices';
 import { mulberry32 } from './prng';
-import { clipEnd, loadClipBuffer, scheduleClip } from './clips';
+import { clipBufferOffset, clipEnd, loadClipBuffer, scheduleClip } from './clips';
 import { KIND_META, type AudioClip, type Layer, type Project, type Scene } from './types';
 
 /** Static fader target for a layer — mirrors applyStrip() in voices.ts. */
@@ -171,7 +171,8 @@ async function scheduleClips(
 
     scheduleClip(master, clip, buffer, {
       at: clip.start + headTrim - windowStart,
-      offset: clip.offset + headTrim,
+      // timeline trim expressed in buffer seconds at the clip's playback rate
+      offset: clipBufferOffset(clip.offset + headTrim, clip),
       duration,
     });
     placed.push(clip);

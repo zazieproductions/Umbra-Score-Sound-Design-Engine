@@ -16,7 +16,7 @@
 
 import { buildMaster, DEFAULT_MASTER, f32, type MasterChain, type MasterParams } from './dsp';
 import { buildVoice, type Voice } from './voices';
-import { clipEnd, loadClipBuffer, scheduleClip, type ClipVoice } from './clips';
+import { clipBufferOffset, clipEnd, loadClipBuffer, scheduleClip, type ClipVoice } from './clips';
 import { KIND_META, type AudioClip, type Layer } from './types';
 
 export type { MasterParams };
@@ -235,13 +235,11 @@ export class ScoreEngine {
       const into = Math.max(0, time - clip.start);
       const remaining = clip.duration - into;
       if (remaining <= 0.05) continue;
-      // For library clips with complex transforms, we still use the simple
-      // scheduleClip path — the transform filters are applied at generation
-      // time via offline rendering or via the library's own derived buffers
-      // when needed. Keeping one path avoids duplicating voice graphs.
+      // scheduleClip honours clip.transform in the graph both paths share
+      // (monitor here, offline in render.ts), so playback and export agree.
       const voice = scheduleClip(this.master, clip, buffer, {
         at: now + 0.02,
-        offset: clip.offset + into,
+        offset: clipBufferOffset(clip.offset + into, clip),
         duration: remaining,
       });
       this.liveClips.set(id, { voice, clip, scheduledAt: time });

@@ -76,6 +76,24 @@ export default function App() {
                 <Sparkles size={9} /> {studio.layerCount} stems ready
               </span>
             )}
+            {project && (
+              <span
+                className={`chip hidden lg:inline-flex ${studio.saveState === 'error' ? 'border-tan/50 text-tan' : 'border-white/10 text-dim'}`}
+                title={
+                  studio.saveError
+                    ? `local draft save failed — ${studio.saveError}`
+                    : 'Project drafts auto-save to this browser (IndexedDB). Clips, edits, provenance and master settings are restored on reload; local video and blob URLs are not.'
+                }
+              >
+                {studio.saveState === 'saving'
+                  ? 'saving draft…'
+                  : studio.saveState === 'error'
+                    ? 'draft save failed'
+                    : studio.savedAt
+                      ? `draft saved ${new Date(studio.savedAt).toLocaleTimeString([], { hour12: false })}`
+                      : 'draft not saved yet'}
+              </span>
+            )}
             <span className="chip hidden md:inline-flex">
               <Command size={9} /> space · play
             </span>

@@ -1,11 +1,11 @@
 import { useRef, useState } from 'react';
-import { Film, Sparkles, UploadCloud, Cpu, ShieldCheck, Waypoints } from 'lucide-react';
+import { Film, Sparkles, UploadCloud, Cpu, RotateCcw, ShieldCheck, Waypoints } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 
 const STEPS = [
-  { icon: Waypoints, t: 'Shot boundary detection', d: 'Frame-differential + optical-flow segmentation, tension and motion curves per cut.' },
-  { icon: Cpu, t: 'Layered orchestration', d: 'Strings, choir, brass, taiko, drones, sub pressure and foley scored to the scene key.' },
-  { icon: ShieldCheck, t: 'Conform & deliver', d: '-16 LUFS loudness-normalised master, true-peak limited stems and HD export.' },
+  { icon: Waypoints, t: 'Structural scene plan', d: 'A deterministic scene layout — timing, key and tension — is planned from the reel length, ready the moment the cut lands.' },
+  { icon: Cpu, t: 'Layered orchestration', d: 'Umbra Procedural voices (drone, sub, strings, brass, taiko, foley…) are scored to each scene and synthesised live in the browser.' },
+  { icon: ShieldCheck, t: 'Conform & deliver', d: '-16 LUFS loudness-normalised master, true-peak limited stems and 24-bit HD export from the same DSP chain you hear.' },
 ];
 
 export default function Uploader({ studio }: { studio: Studio }) {
@@ -21,13 +21,14 @@ export default function Uploader({ studio }: { studio: Studio }) {
             <Sparkles size={10} /> UMBRA SCORE ENGINE · Cinematic Composer
           </span>
           <h1 className="font-display text-[38px] font-extrabold leading-[1.05] tracking-[-0.03em] text-bone sm:text-[52px]">
-            Score it like a Hollywood mix.
-            <span className="block bg-gradient-to-r from-ember via-orchid to-violet bg-clip-text text-transparent">Frame by frame.</span>
+            Score it like a theatre dub.
+            <span className="block bg-gradient-to-r from-ember via-orchid to-violet bg-clip-text text-transparent">Cut by cut.</span>
           </h1>
           <p className="mx-auto mt-3.5 max-w-[520px] text-[13.5px] leading-relaxed text-ash">
-            Drop a cut. UMBRA analyses every scene and scores it like a theatrical soundtrack — full string sections, choir,
-            brass and taiko layered over deep sub pressure, immersive convolution spaces, hit-ducked dynamics and polished
-            transitions — ready for HD delivery.
+            Drop a cut. UMBRA builds a structural scene plan from the reel length, then scores every block with Umbra
+            Procedural voices — strings, choir, brass and taiko over deep sub pressure, immersive convolution spaces and
+            hit-ducked dynamics. Everything stays editable, and a local ML backend can add shot-accurate analysis and
+            trained-model cues when you install it.
           </p>
         </div>
 
@@ -85,7 +86,26 @@ export default function Uploader({ studio }: { studio: Studio }) {
               >
                 <Film size={13} /> Load demo reel
               </span>
+              {studio.hasSavedDraft && (
+                <span
+                  className="btn border-brine/45 text-brine"
+                  title="Reopen the newest locally saved project (audio clips are reconnected from the cache)"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void studio.resumeSaved();
+                  }}
+                >
+                  <RotateCcw size={13} /> Resume saved project
+                </span>
+              )}
             </div>
+            {studio.hasSavedDraft && (
+              <p className="mt-2 text-[9.5px] text-dim">
+                A project draft is stored in this browser. Drafts keep every clip, edit and licence; local video files and
+                session blob URLs are not restorable — see the activity log after resuming for anything that had to be rebuilt.
+              </p>
+            )}
           </div>
         </label>
 
@@ -100,7 +120,7 @@ export default function Uploader({ studio }: { studio: Studio }) {
         </div>
 
         <div className="rise mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5" style={{ animationDelay: '540ms' }}>
-          {['48 kHz / 24-bit', '17 layer classes', 'true-peak -1 dBTP', '-16 LUFS master', 'stem + master delivery', 'frame-accurate sync'].map((t) => (
+          {['48 kHz / 24-bit', '17 layer classes', 'true-peak -1 dBTP', '-16 LUFS master', 'stem + master delivery', 'all clips editable'].map((t) => (
             <span key={t} className="eyebrow text-[8.5px]">
               {t}
             </span>

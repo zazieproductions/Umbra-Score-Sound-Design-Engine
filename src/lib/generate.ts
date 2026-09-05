@@ -17,7 +17,27 @@ import { mulberry32, hashString } from './prng';
 import type { Layer, LayerKind, Project, Scene, SpaceId } from './types';
 import { KIND_META } from './types';
 
-const FRAMES = ['/frames/f1.jpg', '/frames/f2.jpg', '/frames/f3.jpg', '/frames/f4.jpg', '/frames/f5.jpg', '/frames/f6.jpg'];
+/**
+ * Abstract per-scene visual placeholder. Umbra's local structural plan has no
+ * video stills (real stills would require actual shot analysis of the source
+ * video), so scenes get a deterministic, clearly non-photographic card rather
+ * than a broken /frames/... image.
+ */
+function sceneStillUri(index: number, tension: number): string {
+  const hue = 226 + tension * 64;
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360">' +
+    '<defs><radialGradient id="g" cx="50%" cy="40%" r="78%">' +
+    `<stop offset="0%" stop-color="hsl(${hue.toFixed(0)},52%,24%)"/>` +
+    `<stop offset="55%" stop-color="hsl(${hue.toFixed(0)},48%,11%)"/>` +
+    '<stop offset="100%" stop-color="#050409"/></radialGradient></defs>' +
+    '<rect width="640" height="360" fill="url(#g)"/>' +
+    `<circle cx="50%" cy="40%" r="${(26 + tension * 44).toFixed(1)}" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>` +
+    '<text x="26" y="322" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" letter-spacing="5" fill="rgba(255,255,255,0.45)">' +
+    `SCENE ${String(index).padStart(2, '0')}</text>` +
+    '</svg>';
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
 
 /** Cinematic key centres (Hz). All pitched layers in a scene resolve to these. */
 const ROOTS = [49, 55, 61.74, 65.41, 73.42]; // G1 · A1 · B1 · C2 · D2
@@ -126,7 +146,13 @@ function mkLayer(kind: LayerKind, rnd: () => number, space: SpaceId, tension: nu
   };
 }
 
-export function analyzeProject(name: string, duration: number, videoUrl: string | null, sourceLabel: string): Project {
+export function analyzeProject(
+  name: string,
+  duration: number,
+  videoUrl: string | null,
+  sourceLabel: string,
+  resolution = 'unmeasured',
+): Project {
   const rnd = mulberry32(hashString(name + duration.toFixed(2)));
   // richer stacks: 5–9 scenes depending on reel length
   const count = Math.max(5, Math.min(9, Math.round(duration / 22)));
@@ -152,12 +178,15 @@ export function analyzeProject(name: string, duration: number, videoUrl: string 
       start,
       end,
       title: bank.title,
-      frame: FRAMES[i % FRAMES.length],
+      frame: sceneStillUri(i + 1, tension),
       tags: bank.tags,
       tension,
       motion: Math.min(0.97, 0.12 + rnd() * 0.5 + tension * 0.4),
       summary: bank.summary,
-      status: 'queued',
+      // The structural plan is computed synchronously — scenes are ready the
+      // moment they exist. 'analyzing'/'generating' are reserved for genuine
+      // async analysis (backend shot detection), never for staged theatre.
+      status: 'ready',
       hits: hits.sort((a, b) => a - b),
       layers: bank.kinds.map((k) => mkLayer(k, rnd, bank.space, tension, root)),
     });
@@ -168,7 +197,7 @@ export function analyzeProject(name: string, duration: number, videoUrl: string 
     source: sourceLabel,
     duration,
     fps: 24,
-    resolution: '3840 × 2160',
+    resolution,
     videoUrl,
     scenes,
     clips: [],
@@ -193,8 +222,12 @@ export function regenerateLayer(l: Layer): Layer {
   };
 }
 
-export function addLayer(kind: LayerKind, space: SpaceId = 'hall', tension = 0.6, root = 55): Layer {
-  return mkLayer(kind, mulberry32(Math.floor(Math.random() * 1e9)), space, tension, root);
+export function addLayer(kind: LayerKind, space: SpaceId = 'hall', tension = 0.6, root = 55, seed?: number): Layer {
+  // With a seed the layer is fully deterministic (re-rendering a stored
+  // procedural clip from its seed must reproduce the same voice parameters).
+  // Without one the caller gets a fresh random variant.
+  const rnd = mulberry32((seed ?? Math.floor(Math.random() * 1e9)) >>> 0);
+  return mkLayer(kind, rnd, space, tension, root);
 }
 
 /** Deterministic waveform envelope for timeline drawing. */
