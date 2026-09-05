@@ -166,6 +166,27 @@ export interface AudioClip {
   variantIndex?: number;
   // legacy end time (derived as start+duration, kept for some UI compat)
   end?: number;
+
+  /* --- autonomous video-analysis provenance (explainable, editable) --- */
+  /** observed onset from video analysis (project seconds) */
+  eventTimestamp?: number;
+  /** where this clip was intentionally placed (project seconds) */
+  placementTimestamp?: number;
+  /** event confidence from the video-analysis stage (0..1) */
+  eventConfidence?: number;
+  /** the exact query that produced this clip */
+  searchQuery?: string;
+  /** analysis evidence strings behind the event */
+  eventEvidence?: string[];
+  /** true when this clip was laid down by an AUTO run */
+  autoPlaced?: boolean;
+  /* retrieval intent from the video analysis (kept for FIND ALTERNATIVE) */
+  eventKind?: import('./library/types').SoundEventKind;
+  eventMaterial?: string;
+  eventAction?: string;
+  eventEnvironment?: string;
+  eventDistance?: import('./library/types').SoundDistance;
+  eventPerspective?: string;
 }
 
 export const CLIP_PROVIDER_META: Record<ClipProvider, { label: string; color: string; short: string }> = {
@@ -195,6 +216,10 @@ export interface Project {
   clips: AudioClip[];
   /** user-marked final-cut events (e.g. DOOR OPEN @ 00:18.4) */
   spotting: import('./library/types').SpottingEvent[];
+  /** events detected from the actual video by the pixel analyzer (editable) */
+  soundEvents?: import('./library/types').SoundEventCandidate[];
+  /** honest report of the last video-analysis pass */
+  soundAnalysis?: import('./library/types').SoundEventAnalysis;
   createdAt: number;
 }
 

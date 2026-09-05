@@ -3,18 +3,21 @@
  *
  *  Never trust the first search result. This pipeline combines:
  *    semantic text similarity         (query/tag/name overlap)
- *    CLAP similarity                  (optional in-browser reranker)
- *    duration suitability             (event vs. bed roles)
- *    license policy                   (hard gate + preference)
+ *    event-role + material match      (what the event actually is)
+ *    duration suitability             (transient vs bed)
  *    audio quality                    (sample rate, channels, format)
- *    popularity / ratings             (provider signals)
+ *    CLAP similarity                  (optional in-browser reranker)
+ *    provider relevance               (Freesound's own score)
+ *    license preference               (hard gate + preference)
+ *    popularity / ratings             (weak signal only)
  *
  *  MATCH is informational transparency — a weighted blend, NOT a claim
  *  of objective quality. CLAP is one signal among many and can never
- *  overrule the user.
+ *  overrule the user. Obvious mismatches (excessive duration, weak
+ *  semantic match) are surfaced as `flags`, never hidden.
  * ==================================================================== */
 
-import type { LicensePolicy, LibraryAsset, RankedCandidate, RetrievalIntent } from './types';
+import type { LicensePolicy, LibraryAsset, RankedCandidate, RetrievalIntent, SoundRole } from './types';
 import { isBedRole, licenseAllowed } from './types';
 
 export interface ClapReranker {
@@ -74,6 +77,69 @@ function scoreText(query: string, asset: LibraryAsset): number {
   return Math.min(1, sName + sTags + sDesc + subBonus);
 }
 
+/* ------------------------------------------ role / material match --- */
+
+const ROLE_TAG_KEYWORDS: Record<SoundRole, string[]> = {
+  ROOM_TONE: ['room-tone', 'room tone', 'roomtone', 'ambience', 'interior', 'room'],
+  AMBIENCE: ['ambience', 'atmosphere', 'background', 'interior', 'room'],
+  FOOTSTEP: ['footstep', 'footsteps', 'step', 'steps', 'walk', 'walking', 'boot', 'gait', 'foley'],
+  CLOTHING: ['cloth', 'clothing', 'fabric', 'jacket', 'coat', 'rustle'],
+  DOOR: ['door', 'hinge', 'latch', 'doorway', 'gate', 'creak'],
+  WOOD: ['wood', 'wooden', 'plank', 'floorboard', 'creak'],
+  METAL: ['metal', 'metallic', 'iron', 'steel', 'chain', 'clank', 'clang'],
+  GLASS: ['glass', 'window', 'pane', 'clink'],
+  BODY: ['body', 'flesh', 'hand', 'organic', 'contact'],
+  BREATH: ['breath', 'breathing', 'exhale', 'inhale', 'pant'],
+  MECHANICAL: ['machine', 'mechanical', 'engine', 'ventil', 'motor', 'industrial', 'compressor', 'fan', 'hum', 'appliance'],
+  ELECTRICAL: ['electrical', 'electric', 'power', 'hum', 'buzz', 'transformer'],
+  WIND: ['wind', 'breeze', 'gust', 'howl'],
+  WEATHER: ['rain', 'storm', 'weather', 'thunder', 'drizzle'],
+  WATER: ['water', 'drip', 'pipe', 'drain', 'leak', 'liquid', 'pour'],
+  CREAK: ['creak', 'creaking', 'groan', 'squeak'],
+  SCRAPE: ['scrape', 'scraping', 'drag', 'scuff'],
+  IMPACT: ['impact', 'thud', 'hit', 'collision', 'crash', 'slam', 'boom'],
+  KNOCK: ['knock', 'knocking', 'rap', 'raps'],
+  RATTLE: ['rattle', 'rattling', 'shake', 'clatter', 'jingle'],
+  RUMBLE: ['rumble', 'sub', 'low', 'drone'],
+  DRONE: ['drone', 'sustained', 'hum', 'low'],
+  TEXTURE: ['texture', 'granular', 'airy', 'whisper'],
+  TRANSITION: ['whoosh', 'transition', 'sweep'],
+  ANIMAL: ['animal', 'creature', 'rat', 'insect', 'bird', 'scurry'],
+  VEHICLE: ['vehicle', 'car', 'traffic', 'train', 'engine', 'plane'],
+  MISC_FOLEY: ['foley', 'object', 'prop', 'sound-effect', 'fx'],
+};
+
+/** How well the candidate's tags/title match the event ROLE + MATERIAL. */
+function scoreRoleMaterial(intent: RetrievalIntent, asset: LibraryAsset): number {
+  const hay = `${asset.title} ${asset.tags.join(' ')} ${asset.description ?? ''}`.toLowerCase();
+  const roleWords = ROLE_TAG_KEYWORDS[intent.role] ?? [];
+  let roleHits = 0;
+  for (const w of roleWords) if (hay.includes(w)) roleHits++;
+  const roleScore = roleWords.length ? Math.min(1, roleHits / Math.min(4, roleWords.length)) : 0.3;
+
+  let materialScore = 0.5;
+  const material = intent.material?.toLowerCase();
+  if (material) {
+    const matTerms: Record<string, string[]> = {
+      metal: ['metal', 'metallic', 'iron', 'steel', 'chain', 'rust'],
+      wood: ['wood', 'wooden', 'plank', 'floorboard'],
+      glass: ['glass', 'pane', 'window'],
+      concrete: ['concrete', 'cement', 'stone', 'stair', 'staircase'],
+      cloth: ['cloth', 'clothing', 'fabric', 'jacket'],
+    };
+    const terms = matTerms[material] ?? [material];
+    const found = terms.some((t) => hay.includes(t));
+    materialScore = found ? 1 : 0.1;
+  }
+  const distance = intent.distance;
+  if (distance === 'far') {
+    const distant = hay.includes('distant') || hay.includes('far') || hay.includes('background');
+    if (distant) materialScore = Math.min(1, materialScore + 0.2);
+    else materialScore *= 0.8;
+  }
+  return roleScore * 0.6 + materialScore * 0.4;
+}
+
 /* ----------------------------------------------- duration fitness --- */
 
 function scoreDuration(intent: RetrievalIntent, asset: LibraryAsset): number {
@@ -130,6 +196,23 @@ function scorePopularity(asset: LibraryAsset): number {
   return pop * 0.7 + rating * 0.3;
 }
 
+/* --------------------------------------------------- quality flags -- */
+
+function detectFlags(intent: RetrievalIntent, asset: LibraryAsset, text: number): string[] {
+  const flags: string[] = [];
+  const d = asset.duration || 0;
+  if (intent.durationFit === 'short' && !isBedRole(intent.role) && d > 8) {
+    flags.push(`excessive duration for a ${intent.role.toLowerCase()} event (${d.toFixed(1)}s — likely ambience, not one-shot)`);
+  }
+  if ((isBedRole(intent.role) || intent.durationFit === 'long') && d > 0 && d < 2) {
+    flags.push(`too short for a continuous bed (${d.toFixed(1)}s)`);
+  }
+  if (text <= 0.05 && asset.tags.length && asset.title && !/similar to/i.test(intent.query)) {
+    flags.push('weak semantic match: no shared terms between intent and candidate metadata');
+  }
+  return flags;
+}
+
 /* ------------------------------------------------------- pipeline --- */
 
 export interface RankInput {
@@ -141,8 +224,14 @@ export interface RankInput {
   clapLabel?: string;
 }
 
-const W = { text: 0.34, duration: 0.16, license: 0.2, quality: 0.1, popularity: 0.08, clap: 0.22 };
-// license is a gate + preference, so effective weight applies when allowed
+/**
+ * Transparent weights — refined for the autonomous pipeline so MATCH is a
+ * weighted blend focused on the event, not on popularity:
+ *   text 0.24 · role/material 0.20 · duration 0.12 · quality 0.10 ·
+ *   CLAP 0.14 · provider relevance 0.08 · license preference 0.08 ·
+ *   popularity 0.04
+ */
+const W = { text: 0.24, role: 0.2, duration: 0.12, quality: 0.1, clap: 0.14, provider: 0.08, license: 0.08, popularity: 0.04 };
 
 export function rankCandidates(input: RankInput): RankedCandidate[] {
   const ranked: RankedCandidate[] = [];
@@ -150,9 +239,11 @@ export function rankCandidates(input: RankInput): RankedCandidate[] {
     const lic = scoreLicense(input.policy, asset);
     const signals: RankedCandidate['signals'] = [];
     const text = scoreText(input.intent.query, asset);
-    signals.push({ label: 'text', value: text.toFixed(2), weight: W.text });
+    signals.push({ label: 'text relevance', value: text.toFixed(2), weight: W.text });
+    const role = scoreRoleMaterial(input.intent, asset);
+    signals.push({ label: 'role / material', value: role.toFixed(2), weight: W.role });
     const dur = scoreDuration(input.intent, asset);
-    signals.push({ label: 'duration', value: dur.toFixed(2), weight: W.duration });
+    signals.push({ label: 'duration fit', value: dur.toFixed(2), weight: W.duration });
     const qual = scoreQuality(asset);
     signals.push({ label: 'audio quality', value: qual.toFixed(2), weight: W.quality });
     const pop = scorePopularity(asset);
@@ -164,21 +255,28 @@ export function rankCandidates(input: RankInput): RankedCandidate[] {
     }
     // provider relevance score (Freesound search engine) — blends with text
     const provider = asset.score !== undefined ? Math.min(1, asset.score / 100) : 0;
-    signals.push({ label: 'provider relevance', value: provider.toFixed(2), weight: 0.12 });
+    signals.push({ label: 'provider relevance', value: provider.toFixed(2), weight: W.provider });
+    signals.push({ label: 'license preference', value: lic.ok ? lic.pref.toFixed(2) : 'gate', weight: W.license });
+
+    const flags = detectFlags(input.intent, asset, text);
+    for (const f of flags) signals.push({ label: 'quality flag', value: f, weight: 0 });
 
     let raw;
-    if (!lic.ok) raw = 0;
-    else {
-      // normalize weights after removing the license gate penalty
+    if (!lic.ok) {
+      raw = 0;
+    } else {
       raw =
         (text * W.text +
+          role * W.role +
           dur * W.duration +
-          lic.pref * W.license +
           qual * W.quality +
           pop * W.popularity +
           clap * W.clap +
-          provider * 0.12) /
-        (W.text + W.duration + W.license + W.quality + W.popularity + W.clap + 0.12);
+          provider * W.provider +
+          lic.pref * W.license) /
+        (W.text + W.role + W.duration + W.quality + W.popularity + W.clap + W.provider + W.license);
+      // obvious mismatch is a penalty, never a mystery
+      for (let f = 0; f < flags.length; f++) raw *= 0.82;
     }
     ranked.push({
       asset,
@@ -186,6 +284,7 @@ export function rankCandidates(input: RankInput): RankedCandidate[] {
       signals,
       licenseOk: lic.ok,
       licenseReason: lic.reason,
+      flags,
     });
   }
   return ranked.sort((a, b) => b.match - a.match);

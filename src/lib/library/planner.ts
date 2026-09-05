@@ -9,8 +9,8 @@
  *  scenes get more intents; minimal scenes get deliberately few.
  * ==================================================================== */
 
-import type { RetrievalIntent, SoundDensity, SoundRole, SpottingEvent, SceneSoundContext } from './types';
-import { HORROR_DRONE_TRANSFORM } from './types';
+import type { RetrievalIntent, SoundDensity, SoundRole, SoundEventCandidate, SpottingEvent, SceneSoundContext } from './types';
+import { HORROR_DRONE_TRANSFORM, isBedRole } from './types';
 
 let intentSeq = 0;
 const nid = () => `int${Date.now().toString(36)}${(intentSeq++).toString(36)}`;
@@ -177,10 +177,232 @@ export function planScene(ctx: SceneSoundContext, opts: PlanOptions): RetrievalI
 /** Manually trigger retrieval for one event (e.g. user added DOOR OPEN @ 00:18.4). */
 export function planEvent(ctx: SceneSoundContext, ev: SpottingEvent): RetrievalIntent {
   const base = ROLE_QUERIES[ev.role];
-  return mkIntent(ctx, ev.role, base.q, base.alts, ev.time, 0, base.fit, 1, false, `spotting event: ${ev.label}`);
+  return mkIntent(ctx, ev.role, base.q, base.alts, ev.time, 0, base.fit, 1, false, `spotting event: ${ev.label}`, {
+    origin: 'spotting',
+    detectedTimestamp: ev.time,
+    placementTimestamp: ev.time,
+    timingToleranceMs: 120,
+    eventConfidence: 1,
+    eventEvidence: [`user-marked: ${ev.label}`],
+  });
+}
+
+/* ------------------------------------------------- video-event plans -- */
+
+export interface PlanEventsOptions {
+  density?: SoundDensity;
+  timingToleranceMs?: number;
+  eventConfidenceThreshold?: number;
+  /** hard bound on intents per scene run (event condensation) */
+  maxIntents?: number;
+}
+
+/**
+ * Convert video-analysis `SoundEventCandidate`s into retrieval intents.
+ *
+ * Rules:
+ *   - event candidates drive the timestamps (never re-snap to scene starts);
+ *   - repeated role events (e.g. 5 footsteps) collapse into ONE intent with
+ *     `familySteps` → one search, rotated variants at each onset;
+ *   - candidates below the configurable event-confidence threshold are
+ *     `suggestOnly` — visible, never auto-placed;
+ *   - no candidates → silence is preserved (no fabricated intent).
+ */
+export function planSoundEvents(
+  ctx: SceneSoundContext,
+  events: SoundEventCandidate[],
+  opts: PlanEventsOptions = {},
+): RetrievalIntent[] {
+  // density keeps intents conservative: video events decide what exists,
+  // density caps how many of them survive condensation (see maxIntents)
+  const tolerance = opts.timingToleranceMs ?? 120;
+  const confidenceThreshold = opts.eventConfidenceThreshold ?? 0.8;
+  const maxIntents = opts.maxIntents ?? 14;
+  const inScene = events.filter((e) => e.sceneId === ctx.sceneId || !e.sceneId);
+
+  if (!inScene.length) {
+    // explicit negative space — a valid decision, never a search
+    return [
+      mkIntent(ctx, 'MISC_FOLEY', '', [], null, 0, 'medium', 0.1, false, `${ctx.title}: no detected sound-producing activity — keep negative space`, {
+        isSilenceChoice: true,
+        origin: 'video-analysis',
+      }),
+    ];
+  }
+
+  const intents: RetrievalIntent[] = [];
+  const used = new Set<string>();
+
+  // 1) beds first (room tone / ambience) — anchored at the actual activity
+  const beds = new Set<SoundRole>();
+  for (const ev of inScene) {
+    if (isBedRole(ev.suggestedRole) && !beds.has(ev.suggestedRole)) beds.add(ev.suggestedRole);
+  }
+  if (!beds.size && inScene.length && (hasAny(ctx, /interior|room|basement|hall|building/i))) beds.add('ROOM_TONE');
+  for (const role of beds) {
+    const ev = inScene.find((e) => e.suggestedRole === role);
+    if (!ev) continue;
+    const base = ROLE_QUERIES[role];
+    const query = ev.query || base.q;
+    const int = mkIntent(ctx, role, query, ev.altQueries.length ? ev.altQueries : base.alts, ev.timestamp, 0, base.fit, 0.55 + ev.confidence * 0.4, false, `video bed: ${ev.evidence.join(' · ')}`, {
+      origin: 'video-analysis',
+      eventKind: ev.event,
+      detectedTimestamp: ev.timestamp,
+      placementTimestamp: ev.placementTimestamp ?? ev.timestamp,
+      timingToleranceMs: tolerance,
+      eventConfidence: ev.confidence,
+      eventEvidence: ev.evidence,
+      material: ev.material,
+      action: ev.action,
+      environment: ev.environment,
+      distance: ev.distance,
+      perspective: ev.perspective,
+      suggestOnly: ev.ambiguous === true || ev.confidence < confidenceThreshold,
+    });
+    intents.push(int);
+    used.add(ev.id);
+  }
+
+  // 2) footstep families — one search per group
+  const steps = inScene.filter((e) => e.suggestedRole === 'FOOTSTEP' && !used.has(e.id));
+  const stepGroups: SoundEventCandidate[][] = [];
+  for (const ev of steps) {
+    const g = stepGroups[stepGroups.length - 1];
+    if (g && ev.timestamp - g[g.length - 1].timestamp <= 6) g.push(ev);
+    else stepGroups.push([ev]);
+  }
+  for (const group of stepGroups) {
+    const first = group[0];
+    const base = ROLE_QUERIES.FOOTSTEP;
+    const confidence = Math.max(...group.map((e) => e.confidence));
+    const allOnsets = group.map((e) => e.timestamp).sort((a, b) => a - b);
+    const int = mkIntent(
+      ctx,
+      'FOOTSTEP',
+      first.query || base.q,
+      first.altQueries.length ? first.altQueries : base.alts,
+      allOnsets[0],
+      0,
+      'short',
+      0.55 + confidence * 0.4,
+      false,
+      `video: ${group.length} contact(s) on the walk — one family, one search`,
+      {
+        origin: 'video-analysis',
+        eventKind: first.event,
+        detectedTimestamp: allOnsets[0],
+        placementTimestamp: allOnsets[0],
+        timingToleranceMs: tolerance,
+        eventConfidence: confidence,
+        eventEvidence: group.flatMap((e) => e.evidence),
+        material: first.material,
+        action: first.action,
+        environment: first.environment,
+        distance: first.distance,
+        perspective: first.perspective,
+        familySteps: allOnsets,
+        suggestOnly: group.some((e) => e.ambiguous) || confidence < confidenceThreshold,
+      },
+    );
+    intents.push(int);
+    group.forEach((e) => used.add(e.id));
+  }
+
+  // 3) remaining events — dedupe by role+tolerance, keep the strongest
+  const remaining = inScene.filter((e) => !used.has(e.id));
+  for (const ev of remaining) {
+    const base = ROLE_QUERIES[ev.suggestedRole] ?? ROLE_QUERIES.MISC_FOLEY;
+    const fit = isBedRole(ev.suggestedRole) ? 'long' : ev.suggestedRole === 'MECHANICAL' || ev.suggestedRole === 'VEHICLE' || ev.suggestedRole === 'WATER' || ev.suggestedRole === 'WIND' ? 'medium' : 'short';
+    const dup = intents.find((i) => i.role === ev.suggestedRole && Math.abs((i.detectedTimestamp ?? i.time ?? 0) - ev.timestamp) < (3 * tolerance) / 1000);
+    if (dup) {
+      if ((ev.confidence ?? 0) > (dup.eventConfidence ?? 0)) {
+        dup.query = ev.query || dup.query;
+        dup.altQueries = ev.altQueries.length ? ev.altQueries : dup.altQueries;
+        dup.eventConfidence = ev.confidence;
+        dup.suggestOnly = ev.ambiguous === true || ev.confidence < confidenceThreshold;
+      }
+      continue;
+    }
+    const int = mkIntent(ctx, ev.suggestedRole, ev.query || base.q, ev.altQueries.length ? ev.altQueries : base.alts, ev.timestamp, 0, fit, 0.5 + ev.confidence * 0.5, false, `video: ${ev.evidence.join(' · ')}`, {
+      origin: 'video-analysis',
+      eventKind: ev.event,
+      detectedTimestamp: ev.timestamp,
+      placementTimestamp: ev.placementTimestamp ?? ev.timestamp,
+      timingToleranceMs: tolerance,
+      eventConfidence: ev.confidence,
+      eventEvidence: ev.evidence,
+      material: ev.material,
+      action: ev.action,
+      environment: ev.environment,
+      distance: ev.distance,
+      perspective: ev.perspective,
+      suggestOnly: ev.ambiguous === true || ev.confidence < confidenceThreshold,
+    });
+    intents.push(int);
+    used.add(ev.id);
+  }
+
+  // user spotting events always win over inferred ones at the same moment
+  for (const ev of ctx.spotting) {
+    const clash = intents.find((i) => i.role === ev.role && Math.abs((i.detectedTimestamp ?? i.time ?? 0) - ev.time) < (3 * tolerance) / 1000);
+    if (clash) {
+      clash.priority = 1;
+      clash.eventConfidence = 1;
+      clash.suggestOnly = false;
+      clash.origin = 'spotting';
+      clash.reason = `spotting event ${ev.label} overrides inference @ ${ev.time.toFixed(2)}s`;
+      continue;
+    }
+    const base = ROLE_QUERIES[ev.role];
+    intents.push(
+      mkIntent(ctx, ev.role, base.q, base.alts, ev.time, 0, base.fit, 1, false, `spotting event: ${ev.label} @ ${ev.time.toFixed(2)}s`, {
+        origin: 'spotting',
+        eventKind: roleToEventKind(ev.role),
+        detectedTimestamp: ev.time,
+        placementTimestamp: ev.time,
+        timingToleranceMs: tolerance,
+        eventConfidence: 1,
+        eventEvidence: [`user-marked: ${ev.label}`],
+      }),
+    );
+  }
+
+  return intents
+    .sort((a, b) => b.priority - a.priority || (a.detectedTimestamp ?? a.time ?? 0) - (b.detectedTimestamp ?? b.time ?? 0))
+    .slice(0, maxIntents);
 }
 
 /* --------------------------------------------------------- helpers -- */
+
+function roleToEventKind(role: SoundRole): SoundEventCandidate['event'] {
+  const map: Partial<Record<SoundRole, SoundEventCandidate['event']>> = {
+    ROOM_TONE: 'room-tone',
+    AMBIENCE: 'ambience',
+    FOOTSTEP: 'footstep',
+    CLOTHING: 'cloth',
+    DOOR: 'door',
+    METAL: 'impact',
+    GLASS: 'impact',
+    BODY: 'body',
+    BREATH: 'breath',
+    MECHANICAL: 'mechanical',
+    ELECTRICAL: 'mechanical',
+    WIND: 'wind',
+    WEATHER: 'wind',
+    WATER: 'water',
+    IMPACT: 'impact',
+    SCRAPE: 'impact',
+    RATTLE: 'impact',
+    RUMBLE: 'mechanical',
+    DRONE: 'ambience',
+    TEXTURE: 'cloth',
+    TRANSITION: 'other',
+    ANIMAL: 'body',
+    VEHICLE: 'vehicle',
+    MISC_FOLEY: 'object-movement',
+  };
+  return map[role] ?? 'other';
+}
 
 function mkIntent(
   ctx: SceneSoundContext,
@@ -193,6 +415,7 @@ function mkIntent(
   priority: number,
   transformForDrone: boolean,
   reason: string,
+  extras: Partial<RetrievalIntent> = {},
 ): RetrievalIntent {
   const min = fit === 'short' ? 0.1 : fit === 'medium' ? 0.5 : 8;
   const max = fit === 'short' ? 4 : fit === 'medium' ? 12 : 120;
@@ -211,6 +434,7 @@ function mkIntent(
     allowSilence: true,
     reason,
     transform: transformForDrone ? HORROR_DRONE_TRANSFORM : undefined,
+    ...extras,
   };
 }
 

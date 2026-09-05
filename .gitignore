@@ -50,3 +50,7 @@ models/
 training/user_audio/
 training/datasets/
 training/runs/
+
+# Runtime media fixtures are generated locally (see fixtures/runtime/README.md);
+# the tests skip gracefully when the .mp4 files are absent.
+fixtures/runtime/*.mp4

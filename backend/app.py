@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from backend.analysis import embeddings as embeddings_service
+from backend.analysis.events import analyze_video_events
 from backend.analysis.scenes import detect_cuts, plan_project, plan_scene
 from backend.analysis.spotting import HORROR_PRESETS, build_prompt
 from backend.analysis.video import probe_video, toolchain_status
@@ -341,6 +342,29 @@ async def analysis_video(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     return probe_video(Path(path)).to_json()
+
+
+@app.post("/api/analysis/events")
+async def analysis_events(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Pixel motion-event analysis for a video file on the backend.
+
+    Same deterministic spec as the browser analyzer. Bounded frame budget;
+    missing ffmpeg degrades to ``available:false`` (never fabricated).
+    """
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    result = analyze_video_events(
+        Path(path),
+        fps=float(payload.get("fps", 6.0)),
+        max_frames=int(payload.get("maxFrames", 480)),
+        scene_id=payload.get("sceneId") or "",
+        scene_start=float(payload.get("sceneStart", 0.0)),
+        title=payload.get("title") or "",
+        tags=payload.get("tags") or [],
+        summary=payload.get("summary") or "",
+    )
+    return result
 
 
 @app.get("/api/analysis/toolchain")

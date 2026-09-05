@@ -118,6 +118,63 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
         </div>
       )}
 
+      {/* video-driven event provenance (detected/placed/confidence/evidence) */}
+      {(clip.eventTimestamp != null || clip.searchQuery || clip.eventEvidence?.length || clip.autoPlaced) && isLibrary && (
+        <div className="rounded-lg border border-brine/[0.14] bg-brine/[0.04] p-2.5">
+          <span className="eyebrow mb-1.5 flex items-center justify-between text-bone/80">
+            VIDEO EVENT PROVENANCE
+            {clip.autoPlaced && <span className="chip border-brine/40 text-brine">AUTO</span>}
+          </span>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            {clip.eventTimestamp != null && (
+              <>
+                <dt className="eyebrow text-[8px]">detected</dt>
+                <dd className="tnum text-[9.5px] text-ash">{tc(clip.eventTimestamp, true)}</dd>
+              </>
+            )}
+            {clip.placementTimestamp != null && (
+              <>
+                <dt className="eyebrow text-[8px]">placed</dt>
+                <dd className="tnum text-[9.5px] text-ash">{tc(clip.placementTimestamp, true)}{clip.eventTimestamp != null && Math.abs(clip.placementTimestamp - clip.eventTimestamp) >= 0.005 ? ` (Δ ${(clip.placementTimestamp - clip.eventTimestamp).toFixed(3)}s)` : ''}</dd>
+              </>
+            )}
+            {clip.eventConfidence != null && (
+              <>
+                <dt className="eyebrow text-[8px]">event conf</dt>
+                <dd className="tnum text-[9.5px] text-ash">{(clip.eventConfidence * 100).toFixed(0)}%</dd>
+              </>
+            )}
+            {clip.searchQuery && (
+              <>
+                <dt className="eyebrow text-[8px]">query</dt>
+                <dd className="break-words text-[9.5px] text-ash">“{clip.searchQuery}”</dd>
+              </>
+            )}
+            {clip.eventKind && (
+              <>
+                <dt className="eyebrow text-[8px]">event</dt>
+                <dd className="break-words text-[9.5px] text-ash">{clip.eventKind}{clip.eventAction ? ` · ${clip.eventAction}` : ''}</dd>
+              </>
+            )}
+            {(clip.eventMaterial || clip.eventEnvironment) && (
+              <>
+                <dt className="eyebrow text-[8px]">context</dt>
+                <dd className="break-words text-[9.5px] text-ash">
+                  {[clip.eventMaterial, clip.eventEnvironment, clip.eventDistance, clip.eventPerspective].filter(Boolean).join(' · ')}
+                </dd>
+              </>
+            )}
+          </dl>
+          {clip.eventEvidence?.length ? (
+            <ul className="mt-1.5 flex flex-col gap-0.5 border-t border-white/[0.05] pt-1.5">
+              {clip.eventEvidence.map((ev, i) => (
+                <li key={i} className="text-[9px] leading-relaxed text-dim">· {ev}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      )}
+
       {/* library provenance */}
       {isLibrary && clip.asset && (
         <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
