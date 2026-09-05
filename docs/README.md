@@ -29,6 +29,8 @@ Start with the question you are trying to answer.
 ## I want to build / change something
 
 - [`development/SETUP.md`](development/SETUP.md) — reproducible dev environment.
+- [`development/FREESOUND.md`](development/FREESOUND.md) — Freesound API key:
+  server-side `.env` setup, start/verify commands, and the credential rules.
 - [`development/TESTING.md`](development/TESTING.md) — test strategy: what each
   suite proves (and what it does not).
 - [`development/DEBUGGING.md`](development/DEBUGGING.md) — where to look when

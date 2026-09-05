@@ -61,6 +61,16 @@ python3 -m venv .venv
 .venv/bin/python scripts/run_backend.py
 ```
 
+Freesound library retrieval needs a key — it lives in the **backend** process,
+never in the browser and never in Git:
+
+```bash
+cp .env.example .env      # then set FREESOUND_API_KEY=<your Freesound client secret>
+```
+
+Never commit `.env` or a real credential. Setup, start and verification
+commands: [`docs/development/FREESOUND.md`](docs/development/FREESOUND.md).
+
 Models (weights are never committed; fetched from official sources):
 
 ```bash
@@ -79,7 +89,7 @@ Setup details, troubleshooting: [`docs/development/SETUP.md`](docs/development/S
 | **Stable Audio Open** | Physical/environmental sound | Local Python |
 | **MMAudio** | Foley synchronised to picture | Local Python |
 | **CLAP** | Semantic search over *your* library (embeddings, not generation) | Local Python |
-| **Library retrieval** | Freesound + user library, ranked, license-gated, provenance-kept | Browser + IndexedDB |
+| **Library retrieval** | Freesound + user library, ranked, license-gated, provenance-kept | Browser ranking + IndexedDB cache · Freesound HTTP via the local backend (API key is server-side) |
 
 Routing boundaries, capability honesty, and the status ladder
 (`NOT INSTALLED` → … → `RUNTIME VERIFIED`):
@@ -91,6 +101,7 @@ Routing boundaries, capability honesty, and the status ladder
 | --- | --- |
 | Procedural engine, timeline, unified clips, mix + offline render | ✅ working |
 | Library retrieval (ranking, license/provenance, credits) | ✅ 25/25 frontend tests (mocked HTTP) |
+| Freesound integration (server-side key) | ✅ 12 frontend + 21 backend tests (mocked); live API call not reachable from this environment |
 | Backend registry, audio store, jobs, analysis | ✅ 62 backend tests, no downloads |
 | ACE-Step / Stable Audio / MMAudio / CLAP inference | ✅ plumbed — `RUNTIME VERIFIED` only on a machine with weights + deps (not yet in this environment) |
 

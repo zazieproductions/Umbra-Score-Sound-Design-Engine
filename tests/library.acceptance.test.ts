@@ -17,6 +17,11 @@
  *  Every Freesound HTTP response is a controlled fixture (the live API
  *  is unreachable from this environment). Mocks are asserted, never
  *  trusted blindly.
+ *
+ *  Freesound is reached through the Umbra backend
+ *  (`/api/integrations/freesound/*`) because the API key lives server-side.
+ *  The mocks below sit at that seam: no request in this file goes to
+ *  freesound.org, and no fixture contains a credential.
  * ==================================================================== */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -31,8 +36,6 @@ import { exportCreditsTxt, exportCreditsJson, ledgerFromClips } from '../src/lib
 import {
   HORROR_DRONE_TRANSFORM,
   NO_TRANSFORM,
-  EMPTY_FREESOUND_CREDS,
-  type FreesoundCredentials,
   type LicensePolicy,
   type LibraryAsset,
   type RetrievalIntent,
@@ -42,12 +45,6 @@ import {
 } from '../src/lib/library/types';
 
 /* ------------------------------------------------------------ fixtures -- */
-
-const TOKEN = 'umbra-test-token-0000';
-
-function creds(over: Partial<FreesoundCredentials> = {}): FreesoundCredentials {
-  return { ...EMPTY_FREESOUND_CREDS, apiToken: TOKEN, ...over };
-}
 
 /** Minimal WAV header + 0.5s of silence so blob sizes are honest. */
 function wavBlob(seconds = 0.5): Blob {
@@ -111,25 +108,66 @@ function fsSound(over: Partial<FsSound> & { id: number }): FsSound {
   };
 }
 
-/** Route a Freesound search request to a canned fixture by query match. */
-function mockFreesoundSearch(routes: { q: RegExp; results: FsSound[] }[]): ReturnType<typeof vi.fn> {
-  const fn = vi.fn(async (input: RequestInfo | URL) => {
-    const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-    if (url.origin !== 'https://freesound.org') throw new Error(`unexpected origin ${url.origin}`);
-    if (url.pathname === '/apiv2/search/') {
-      const q = url.searchParams.get('query') ?? '';
+/** Status payload the backend returns when a key is configured and accepted. */
+const CONNECTED_STATUS = {
+  provider: 'freesound',
+  configured: true,
+  connected: true,
+  keySource: 'environment:FREESOUND_API_KEY',
+  oauth: { configured: false, quality: 'preview' },
+  apiBase: 'https://freesound.org/apiv2',
+  probed: true,
+  reason: null,
+  hint: null,
+  checkedAt: 1700000000,
+  elapsedMs: 3,
+  capabilities: {
+    search: true,
+    metadata: true,
+    preview: true,
+    similar: true,
+    audioFeatures: true,
+    originalDownload: false,
+  },
+};
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+/**
+ * Route a Umbra-backend Freesound request to a canned fixture by query match.
+ *
+ * The browser calls `/api/integrations/freesound/*` — never freesound.org,
+ * and never with an API key (the key lives in the backend's .env).
+ */
+function mockBackendFreesound(routes: { q: RegExp; results: FsSound[] }[]): ReturnType<typeof vi.fn> {
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://umbra.test');
+    if (url.pathname === '/api/integrations/freesound/status') {
+      return jsonResponse(CONNECTED_STATUS);
+    }
+    if (url.pathname === '/api/integrations/freesound/search') {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { query?: string; page?: number; filters?: string[] };
+      const q = body.query ?? '';
       const route = routes.find((r) => r.q.test(q));
       const results = route?.results ?? [];
-      return new Response(JSON.stringify({ count: results.length, next: null, previous: null, results }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
+      return jsonResponse({
+        provider: 'freesound',
+        query: q,
+        count: results.length,
+        page: body.page ?? 1,
+        pageSize: 30,
+        next: null,
+        previous: null,
+        sounds: results,
       });
     }
     // preview downloads — return a tiny real WAV so blob sizes are truthful
-    if (url.pathname.includes('/data/previews/')) {
+    if (/^\/api\/integrations\/freesound\/sounds\/\d+\/preview$/.test(url.pathname)) {
       return new Response(wavBlob(0.5), { status: 200, headers: { 'content-type': 'audio/mpeg' } });
     }
-    throw new Error(`unmapped freesound url ${url.pathname}`);
+    throw new Error(`unmapped backend url ${url.pathname}`);
   });
   setFetchMock(fn as never);
   return fn;
@@ -191,8 +229,8 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     expect(door!.priority).toBeGreaterThanOrEqual(0.9);
   });
 
-  it('searches Freesound via the official /apiv2/search/ endpoint (token auth)', async () => {
-    const fetchFn = mockFreesoundSearch([
+  it('routes the search through the Umbra backend — no key, no direct Freesound call', async () => {
+    const fetchFn = mockBackendFreesound([
       {
         q: /door/i,
         results: [
@@ -209,7 +247,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
       },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'suggest' });
+    const svc = new RetrievalService({ autoMode: 'suggest' });
     const ctx = scene({ spotting: [spotted()] });
     const intents = planScene(ctx, { density: 'normal' });
     const door = intents.find((i) => i.role === 'DOOR')!;
@@ -218,14 +256,28 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     expect(res.error).toBeNull();
     expect(res.candidates.length).toBeGreaterThan(0);
 
-    // the HTTP layer must have used the CURRENT endpoint with the token
-    const calledUrl = new URL(fetchFn.mock.calls[0][0] as string);
-    expect(calledUrl.pathname).toBe('/apiv2/search/');
-    expect(calledUrl.searchParams.get('token')).toBe(TOKEN);
-    expect(calledUrl.searchParams.get('query')).toMatch(/door/i);
-    expect(calledUrl.searchParams.get('fields')).toContain('previews');
-    expect(calledUrl.searchParams.get('fields')).toContain('license');
-    expect(calledUrl.searchParams.get('filter')).toMatch(/duration/);
+    // the browser must talk to the backend seam, never to freesound.org
+    const searchCalls = fetchFn.mock.calls.filter(([i]) => String(i).includes('/integrations/freesound/search'));
+    expect(searchCalls.length).toBe(1);
+    const firstCall = searchCalls[0];
+    const calledUrl = new URL(String(firstCall[0]), 'http://umbra.test');
+    expect(calledUrl.pathname).toBe('/api/integrations/freesound/search');
+
+    // no request in this run may carry a credential or leave the app origin
+    for (const [input, init] of fetchFn.mock.calls as [RequestInfo | URL, RequestInit | undefined][]) {
+      const transport = `${String(input)} ${String(init?.body ?? '')} ${JSON.stringify(init?.headers ?? {})}`;
+      expect(transport).not.toMatch(/freesound\.org/);
+      expect(transport).not.toMatch(/token=|api[_-]?key/i);
+    }
+
+    // and the payload still asks for everything the pipeline maps
+    const body = JSON.parse(String(firstCall[1]?.body ?? '{}')) as {
+      query?: string;
+      filters?: string[];
+      fields?: string;
+    };
+    expect(body.query).toMatch(/door/i);
+    expect((body.filters ?? []).join(' ')).toMatch(/duration/);
 
     const c = res.candidates[0];
     expect(c.asset.provider).toBe('freesound');
@@ -241,10 +293,10 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
   });
 
   it('auditions the preview: fetches the hq-mp3 once, caches by sound id', async () => {
-    const fetchFn = mockFreesoundSearch([
+    const fetchFn = mockBackendFreesound([
       { q: /door/i, results: [fsSound({ id: 9202, name: 'door_creak_02', tags: ['door'], duration: 1.5, score: 10 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const intent = planEvent(scene(), spotted({ id: 'ev-d', role: 'DOOR', time: 18.4 }));
     const res = await svc.search(intent);
     const asset = res.candidates[0].asset;
@@ -254,15 +306,15 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
     expect(first.blob.size).toBeGreaterThan(44);
 
     // second call must be served from the cache — no second network fetch
-    const previewFetches = fetchFn.mock.calls.filter(([i]) => String(i).includes('/data/previews/')).length;
+    const previewFetches = fetchFn.mock.calls.filter(([i]) => String(i).includes('/sounds/9202/preview')).length;
     expect(previewFetches).toBe(1);
     const second = await svc.ensurePreview(asset);
     expect(second.cacheKey).toBe(first.cacheKey);
-    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/data/previews/')).length).toBe(1);
+    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/sounds/9202/preview')).length).toBe(1);
   });
 
   it('places a REAL editable clip at 00:18.4 with license + provenance attached', async () => {
-    mockFreesoundSearch([
+    mockBackendFreesound([
       {
         q: /door/i,
         results: [
@@ -279,7 +331,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
         ],
       },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const ctx = scene({ spotting: [spotted({ id: 'ev-t1' })] });
     const intent = planEvent(ctx, spotted({ id: 'ev-t1' }));
 
@@ -339,7 +391,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
   });
 
   it('FIND ALTERNATIVE keeps timeline edits and swaps only the source audio', async () => {
-    mockFreesoundSearch([
+    mockBackendFreesound([
       {
         q: /door/i,
         results: [
@@ -348,7 +400,7 @@ describe('T1 · DOOR OPEN @ 00:18.4 → search → audition → placed editable 
         ],
       },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const intent = planEvent(scene(), spotted());
     const res = await svc.search(intent);
     const clip = await svc.placeClip({ sceneId: 'sc-test', intent, candidate: res.candidates[0], start: 18.4, projectId: 'prj' });
@@ -410,7 +462,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
   });
 
   it('AUTO SOUND DESIGN (SUGGEST) returns three+ separate candidate sets and places nothing', async () => {
-    const fetchFn = mockFreesoundSearch([
+    const fetchFn = mockBackendFreesound([
       { q: /room tone|ambience|interior|empty/i, results: [fsSound({ id: 6301, name: 'old_basement_room_tone', tags: ['room-tone', 'interior', 'basement'], description: 'large empty room tone', duration: 30, score: 85 })] },
       { q: /pipe|drip|water/i, results: [fsSound({ id: 6302, name: 'water_drip_pipe_resonance', tags: ['water', 'drip', 'pipe'], description: 'water dripping in metal pipe', duration: 3.0, score: 82 })] },
       { q: /footstep|walk|step/i, results: [fsSound({ id: 6303, name: 'footsteps_concrete_basement', tags: ['footstep', 'concrete', 'basement'], description: 'slow footsteps on concrete', duration: 0.9, score: 78 })] },
@@ -418,7 +470,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
       { q: /drone/i, results: [fsSound({ id: 6305, name: 'low_dark_drone', tags: ['drone', 'low'], description: 'sustained low drone', duration: 40, score: 90 })] },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'suggest', density: 'normal' });
+    const svc = new RetrievalService({ autoMode: 'suggest', density: 'normal' });
     const out = await svc.autoDesign(basement(), 'prj-t2', 'suggest');
 
     // SUGGEST: nothing is placed — this is the honest default
@@ -440,12 +492,12 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
     }
 
     // each search actually hit the API (not one chained mega-query)
-    const searchCalls = fetchFn.mock.calls.filter(([i]) => String(i).includes('/apiv2/search/'));
+    const searchCalls = fetchFn.mock.calls.filter(([i]) => String(i).includes('/integrations/freesound/search'));
     expect(searchCalls.length).toBe(out.suggestions.length);
   });
 
   it('AUTO FULL places several separate clips — one per role, never a flattened file', async () => {
-    const fetchFn = mockFreesoundSearch([
+    const fetchFn = mockBackendFreesound([
       { q: /room tone|ambience|interior|empty/i, results: [fsSound({ id: 6311, name: 'basement_room_tone_loop', tags: ['room-tone'], description: 'basement room tone', duration: 34, score: 96 })] },
       { q: /pipe|drip|water/i, results: [fsSound({ id: 6312, name: 'pipe_drip', tags: ['water', 'drip'], description: 'pipe resonance drip', duration: 3.2, score: 97 })] },
       { q: /footstep|walk|step/i, results: [fsSound({ id: 6313, name: 'soft_footsteps_wood_floor', tags: ['footsteps', 'wood', 'floor', 'basement'], description: 'slow footsteps on wooden floor', duration: 0.7, score: 98 })] },
@@ -453,7 +505,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
       { q: /drone/i, results: [fsSound({ id: 6315, name: 'dark_drone', tags: ['drone'], description: 'dark drone', duration: 45, score: 95 })] },
     ]);
 
-    const svc = new RetrievalService(() => creds(), { autoMode: 'auto-full', density: 'normal', autoFullThreshold: 0.6 });
+    const svc = new RetrievalService({ autoMode: 'auto-full', density: 'normal', autoFullThreshold: 0.6 });
     // user library has priority but is empty; use a fixture-only run
     const out = await svc.autoDesign(basement(), 'prj-t2b', 'auto-full');
 
@@ -489,7 +541,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
     expect(tone!.transform).toEqual(NO_TRANSFORM);
 
     // and the whole thing ran through real API calls
-    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/apiv2/search/')).length).toBeGreaterThanOrEqual(3);
+    expect(fetchFn.mock.calls.filter(([i]) => String(i).includes('/integrations/freesound/search')).length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -498,7 +550,7 @@ describe('T2 · dark industrial basement → AUTO SUGGEST → separate clips', (
  * ==================================================================== */
 describe('T3 · mechanical recording → Umbra drone transform + provenance', () => {
   it('user library import keeps full metadata (never infers license from filename)', async () => {
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const file = new File([wavBlob(3.0)], 'factory_floor_01.wav', { type: 'audio/wav' });
     const rec = await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -516,10 +568,10 @@ describe('T3 · mechanical recording → Umbra drone transform + provenance', ()
 
   it('searches the USER LIBRARY first and ranks it above external sources', async () => {
     // external provider returns a decent machine sound…
-    mockFreesoundSearch([
+    mockBackendFreesound([
       { q: /machine|mechanical|engine/i, results: [fsSound({ id: 7701, name: 'generic_machine_buzz', tags: ['machine'], description: 'machine buzz', duration: 12, score: 90 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const file = new File([wavBlob(12)], 'my_distant_machinery_hum.wav', { type: 'audio/wav' });
     await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -546,10 +598,10 @@ describe('T3 · mechanical recording → Umbra drone transform + provenance', ()
   });
 
   it('places the mechanical recording with the horror-drone transform + provenance, source and transform retained', async () => {
-    mockFreesoundSearch([
+    mockBackendFreesound([
       { q: /machine|mechanical|engine/i, results: [fsSound({ id: 7702, name: 'other_machine', tags: ['machine'], duration: 10, score: 5 })] },
     ]);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const file = new File([wavBlob(12)], 'mech_room_capture_distant_machinery_hum.wav', { type: 'audio/wav' });
     await svc.userLibrary.importFile(file, {
       role: 'MECHANICAL',
@@ -626,7 +678,7 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
   });
 
   it('STRICT policy rejects CC BY-NC; PERSONAL NONCOMMERCIAL accepts it', async () => {
-    mockFreesoundSearch([
+    mockBackendFreesound([
       {
         q: /drone/i,
         results: [
@@ -634,8 +686,8 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
         ],
       },
     ]);
-    const strict = new RetrievalService(() => creds(), { licensePolicy: { mode: 'strict', accepted: ['CC0', 'CC_BY'] } });
-    const personal = new RetrievalService(() => creds(), { licensePolicy: { mode: 'personal', accepted: ['CC0', 'CC_BY', 'CC_BY_NC'] } });
+    const strict = new RetrievalService({ licensePolicy: { mode: 'strict', accepted: ['CC0', 'CC_BY'] } });
+    const personal = new RetrievalService({ licensePolicy: { mode: 'personal', accepted: ['CC0', 'CC_BY', 'CC_BY_NC'] } });
 
     const intent: RetrievalIntent = { id: 'i', sceneId: 's', role: 'DRONE', query: 'drone', altQueries: [], time: null, offset: 0, durationFit: 'long', priority: 1, allowSilence: true, reason: 'test' };
     const strictRes = await strict.search(intent);
@@ -651,10 +703,10 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
   });
 
   it('UNKNOWN license is never auto-placed even by AUTO SAFE', async () => {
-    mockFreesoundSearch([
+    mockBackendFreesound([
       { q: /door/i, results: [fsSound({ id: 8802, name: 'weird_door', tags: ['door'], license: 'Special Use', duration: 1.0, score: 100 })] },
     ]);
-    const svc = new RetrievalService(() => creds(), { autoMode: 'auto-safe', licensePolicy: { mode: 'custom', accepted: ['CC0', 'CC_BY'] } });
+    const svc = new RetrievalService({ autoMode: 'auto-safe', licensePolicy: { mode: 'custom', accepted: ['CC0', 'CC_BY'] } });
     const ctx = scene({ spotting: [spotted({ id: 'ev-x', role: 'DOOR', time: 3 })] });
     const out = await svc.autoDesign(ctx, 'prj', 'auto-safe');
     expect(out.placed).toHaveLength(0);
@@ -665,42 +717,70 @@ describe('license policy is a hard gate, never inferred from a filename', () => 
     setFetchMock((async () => {
       throw new Error('network unreachable');
     }) as never);
-    const svc = new RetrievalService(() => creds());
+    const svc = new RetrievalService();
     const intent = planEvent(scene(), spotted());
     const res = await svc.search(intent);
     expect(res.candidates).toHaveLength(0);
     expect(res.error).toMatch(/network unreachable|Freesound/);
   });
 
-  it('no token → provider reports not-ready and the search returns an honest error', async () => {
-    const svc = new RetrievalService(() => creds({ apiToken: '' }));
-    expect(svc.freesound.status().ready).toBe(false);
-    expect(svc.freesound.status().reason).toMatch(/token/i);
+  it('backend without a key → provider reports not-ready and the search returns an honest error', async () => {
+    setFetchMock((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://umbra.test');
+      if (url.pathname !== '/api/integrations/freesound/status') throw new Error(`unexpected ${url.pathname}`);
+      return jsonResponse({
+        ...CONNECTED_STATUS,
+        configured: false,
+        connected: null,
+        keySource: null,
+        probed: false,
+        checkedAt: null,
+        elapsedMs: null,
+        reason: 'No Freesound API key configured on the backend (FREESOUND_API_KEY is unset).',
+      });
+    }) as never);
+
+    const svc = new RetrievalService();
+    const status = await svc.freesound.status({ force: true });
+    expect(status.ready).toBe(false);
+    expect(status.reason).toMatch(/FREESOUND_API_KEY|key/i);
     const res = await svc.search(planEvent(scene(), spotted()));
     expect(res.candidates).toHaveLength(0);
     expect(res.error).toBeTruthy();
   });
 
-  it('preview and original quality are never conflated; original needs OAuth', async () => {
-    const svc = new RetrievalService(() => creds());
+  it('preview and original quality are never conflated; original needs server-side OAuth', async () => {
+    const svc = new RetrievalService();
     const asset = freesoundToAsset(fsSound({ id: 9901, name: 'q_check', tags: [] }), 'preview', 'fs-9901-preview');
     expect(asset.quality).toBe('preview');
 
+    // no OAuth token on the backend → the backend says so, Umbra repeats it
+    setFetchMock((async () =>
+      jsonResponse(
+        {
+          error:
+            'Original-quality download needs a Freesound OAuth2 access token in FREESOUND_OAUTH_TOKEN. Previews are unaffected.',
+          code: 'oauth_required',
+        },
+        501,
+      )) as never);
     const original = await svc.fetchOriginal(asset).catch((e: Error) => e);
     expect(original).toBeInstanceOf(Error);
     expect((original as Error).message).toMatch(/OAuth/i);
 
-    // with a bearer token the original download uses the right endpoint
-    const bearerFn = vi.fn(async (input: RequestInfo | URL) => {
+    // with an OAuth token on the server the original download works and is
+    // cached under its own (quality-tagged) key
+    const dlFn = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/download/')) return new Response(wavBlob(2), { status: 200, headers: { 'content-type': 'audio/wav' } });
+      if (url.includes('/sounds/9901/download')) {
+        return new Response(wavBlob(2), { status: 200, headers: { 'content-type': 'audio/wav' } });
+      }
       throw new Error(`unexpected ${url}`);
     });
-    setFetchMock(bearerFn as never);
-    const svc2 = new RetrievalService(() => creds({ accessToken: 'oauth-bearer-1', expiresAt: Date.now() + 3600_000 }));
-    const orig = await svc2.fetchOriginal(asset);
+    setFetchMock(dlFn as never);
+    const orig = await new RetrievalService().fetchOriginal(asset);
     expect(orig.cacheKey).toBe('fs-9901-original');
-    expect(String(bearerFn.mock.calls[0][0])).toContain('/sounds/9901/download/');
+    expect(String(dlFn.mock.calls[0][0])).toContain('/api/integrations/freesound/sounds/9901/download');
   });
 });
 

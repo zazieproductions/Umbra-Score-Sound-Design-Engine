@@ -27,7 +27,11 @@ export interface SoundLibraryProvider {
   readonly label: string;
   readonly capabilities: ProviderCapabilities;
 
-  status(): ProviderStatus;
+  /**
+   * Current status. Async because a remote provider must be *asked* —
+   * Freesound readiness lives on the backend, not in the browser.
+   */
+  status(opts?: { force?: boolean }): Promise<ProviderStatus>;
 
   /** Search by a planner intent. Returns raw candidates (service ranks them). */
   search(intent: RetrievalIntent, opts?: SearchOptions): Promise<RetrievalSearchResult>;

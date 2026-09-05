@@ -14,7 +14,7 @@ where each one runs.
 | `stable-audio` | Physical/environmental sound: machinery, room tone, water, wind, debris | Local Python (Diffusers) | `backend/providers/stable_audio.py` |
 | `mmaudio` | Video-conditioned Foley synchronised to picture | Local Python | `backend/providers/mmaudio.py` |
 | `clap` | Semantic search over your own library (embeddings, **not generation**) | Local Python | `backend/providers/clap.py` |
-| Library retrieval (`library` / `user` clip providers) | Freesound, user library, Pixabay-assisted discovery — ranked, license-gated, provenance-kept | Browser + IndexedDB (+ CLAP rerank when installed) | `src/lib/library/` |
+| Library retrieval (`library` / `user` clip providers) | Freesound, user library, Pixabay-assisted discovery — ranked, license-gated, provenance-kept | Browser ranking + IndexedDB cache; Freesound HTTP goes through the local backend because its API key is server-side (+ CLAP rerank when installed) | `src/lib/library/`, `backend/integrations/` |
 
 Routing between them: `backend/providers/registry.py` (`route_intent`) and
 the `/api/route` endpoint — a transparent scorer that returns its reasoning.

@@ -38,7 +38,7 @@ adapters, scene+spotting planner, video/waveform analysis, audio store
 | stable-audio | Validation adapter | NOT runtime-verified here |
 | mmaudio | Adapter, real-or-UNAVAILABLE | NOT runtime-verified here |
 | clap | Embeddings/search adapter | NOT runtime-verified here |
-| library (Freesound/user/Pixabay) | Retrieval subsystem | Verified at plumbing level: 19/19 mocked acceptance tests |
+| library (Freesound/user/Pixabay) | Retrieval subsystem | Verified at plumbing level: 19/19 mocked acceptance tests. Freesound HTTP now runs through the backend (`backend/integrations/`), key server-side — 21 backend + 12 frontend mocked tests; **live freesound.org call NOT runtime-verified here** (outbound TLS blocked in this environment) |
 
 ## Runtime status
 
@@ -48,14 +48,16 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 123 (`npm test`) — 19 retrieval acceptance + 6 architecture
+- Frontend: 135 (`npm test`) — 19 retrieval acceptance + 12 Freesound backend
+  integration + 6 architecture
   invariants + 20 quality-measurement units + 6 rendered gates exercising the
   real engine through headless Web Audio (4 audio-QA + 2 stem-delivery
   equivalence: shared frameCount + Σ-stems-null on genuine convolvers;
   `node-web-audio-api`, skip-not-fail when the addon cannot load) +
   72 export-delivery (clock 6, stemPlan 27, kernel A/B/C/G 8, WAV/BWF 10,
   manifest 6, preflight+ZIP 10, loudness/boundaries 5).
-- Backend: 66 (`pytest backend/tests -q`), no downloads
+- Backend: 87 (`pytest backend/tests -q`), no downloads (incl. 21 Freesound
+  integration tests, `httpx.MockTransport`, no network)
 - `tsc -b` clean · `eslint` clean · `vite build` clean
 
 ## Audio quality gates
@@ -81,7 +83,9 @@ oscillators across all pitched/transient voices (no fold-back aliasing).
 - Backend optional extras (torch, diffusers, CLAP, PySceneDetect) not installed
   in lightweight envs — providers honestly report unavailable.
 - `ffmpeg` external binary required for video metadata/thumbnails.
-- Live Freesound calls need a user token (in-app settings, IndexedDB).
+- Live Freesound calls need `FREESOUND_API_KEY` in a git-ignored `.env`, read by
+  the backend only (never the browser). Verified against a local Freesound
+  stand-in — the production host is unreachable from this sandbox.
 - Legacy `SoundClip` still present at the retrieval boundary (compat shims in
   `src/lib/types.ts`); new code must use `AudioClip`.
 - Browser cache (IndexedDB) durability is best-effort; timeline clips are the

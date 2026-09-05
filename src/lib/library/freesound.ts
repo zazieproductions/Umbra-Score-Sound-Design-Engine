@@ -1,17 +1,24 @@
 /* ==================================================================== *
  *  UMBRA · FREESOUND PROVIDER
  *
- *  Official APIv2 only. No scraping, no mirroring. Verified against the
- *  current documentation (2026-09):
+ *  Official APIv2 only. No scraping, no mirroring. The API key lives in
+ *  the backend process (FREESOUND_API_KEY); this provider is an HTTP
+ *  client for `/api/integrations/freesound/*` and nothing else:
  *
- *    search        GET /apiv2/search/            (token query/header)
- *                  replaces the deprecated /apiv2/search/text/,
- *                  which still redirects — we call the current one.
- *    sound         GET /apiv2/sounds/<id>/       (fields param)
- *    analysis      GET /apiv2/sounds/<id>/analysis/
- *    similar       GET /apiv2/sounds/<id>/similar/?similarity_space=laion_clap
- *    download      GET /apiv2/sounds/<id>/download/   OAuth2 Bearer only
- *    previews      returned in `previews` object — no OAuth2 needed
+ *    search        POST /api/integrations/freesound/search
+ *    sound         GET  /api/integrations/freesound/sounds/<id>
+ *    analysis      GET  /api/integrations/freesound/sounds/<id>/analysis
+ *    similar       GET  /api/integrations/freesound/sounds/<id>/similar
+ *    preview       GET  /api/integrations/freesound/sounds/<id>/preview
+ *    download      GET  /api/integrations/freesound/sounds/<id>/download
+ *                  (OAuth2 bearer, server-side, original quality only)
+ *
+ *  What did NOT change: the retrieval pipeline. Freesound sound objects
+ *  arrive untouched and are still mapped by `freesoundToAsset()` into a
+ *  LibraryAsset — creator, source url, license string, license class,
+ *  sound id, preview URLs and quality — then licensed-gated and ranked by
+ *  `service.ts`. No credential is stored in the browser (no localStorage,
+ *  no IndexedDB, nothing in the bundle).
  *
  *  Licensing: the API returns `license` as one of
  *    "Creative Commons 0" | "Attribution" | "Attribution NonCommercial"
@@ -20,7 +27,6 @@
  * ==================================================================== */
 
 import type {
-  FreesoundCredentials,
   LibraryAsset,
   LicenseClass,
   ProviderCapabilities,
@@ -29,69 +35,22 @@ import type {
   RetrievalSearchResult,
 } from './types';
 import type { PreviewFetch, SearchOptions, SoundLibraryProvider } from './provider';
+import {
+  FreesoundBackendError,
+  fetchFreesoundStatus,
+  freesoundAnalysis,
+  freesoundDownloadUrl,
+  freesoundPreviewUrl,
+  freesoundSearch,
+  freesoundSimilar,
+  type FreesoundStatus,
+  type FsSound,
+} from './freesoundBackend';
 
-const API = 'https://freesound.org/apiv2';
-/** Current search endpoint (post Nov-2025 deprecation of /search/text/). */
-const SEARCH_PATH = '/search/';
+export type { FsSound } from './freesoundBackend';
 
-/** Fields we request — keeps payloads small, includes everything UMBRA needs. */
-const SEARCH_FIELDS = [
-  'id',
-  'url',
-  'name',
-  'tags',
-  'description',
-  'username',
-  'license',
-  'type',
-  'channels',
-  'filesize',
-  'duration',
-  'samplerate',
-  'created',
-  'num_downloads',
-  'avg_rating',
-  'previews',
-  'images',
-  'score',
-  'gen_ai_preference',
-  'md5',
-  'category',
-  'subcategory',
-].join(',');
-
-interface FsSearchResponse {
-  count: number;
-  next: string | null;
-  previous: string | null;
-  results: FsSound[];
-}
-
-export interface FsSound {
-  id: number;
-  url: string;
-  name: string;
-  tags: string[];
-  description: string;
-  username: string;
-  license: string;
-  type: string;
-  channels: number;
-  filesize: number;
-  duration: number;
-  samplerate: number;
-  created: string;
-  num_downloads?: number;
-  avg_rating?: number;
-  previews?: Record<string, string>;
-  images?: Record<string, string>;
-  score?: number;
-  gen_ai_preference?: string;
-  md5?: string;
-  category?: string;
-  subcategory?: string;
-  similar_sounds?: string;
-}
+/** How long a successful/failed status answer is reused before re-asking. */
+const STATUS_CACHE_MS = 20_000;
 
 export function mapFreesoundLicense(raw: string): { cls: LicenseClass; attributionRequired: boolean } {
   switch (raw?.trim().toLowerCase()) {
@@ -117,8 +76,12 @@ export function freesoundToAsset(s: FsSound, quality: 'preview' | 'original', ca
   );
   const images = s.images
     ? {
-        waveform: (s.images.waveform_l ?? s.images.waveform_m ?? '').replace(/^(\/|(https?:\/\/[^/]+))/g, (m) => (m.startsWith('h') ? m : 'https://freesound.org' + m)),
-        spectrum: (s.images.spectral_l ?? s.images.spectral_m ?? '').replace(/^(\/|(https?:\/\/[^/]+))/g, (m) => (m.startsWith('h') ? m : 'https://freesound.org' + m)),
+        waveform: (s.images.waveform_l ?? s.images.waveform_m ?? '').replace(/^(\/|(https?:\/\/[^/]+))/g, (m) =>
+          m.startsWith('h') ? m : 'https://freesound.org' + m,
+        ),
+        spectrum: (s.images.spectral_l ?? s.images.spectral_m ?? '').replace(/^(\/|(https?:\/\/[^/]+))/g, (m) =>
+          m.startsWith('h') ? m : 'https://freesound.org' + m,
+        ),
       }
     : undefined;
   return {
@@ -154,6 +117,32 @@ export function freesoundToAsset(s: FsSound, quality: 'preview' | 'original', ca
   };
 }
 
+/** The backend client surface the provider uses (injectable in tests). */
+export interface FreesoundBackendLike {
+  status(probe?: 'never' | 'auto' | 'always'): Promise<FreesoundStatus>;
+  search(req: {
+    query: string;
+    page?: number;
+    pageSize?: number;
+    filters?: string[];
+    sort?: string;
+    fields?: string;
+  }): Promise<{ count: number; page: number; pageSize: number; sounds: FsSound[] }>;
+  similar(
+    soundId: string | number,
+    page?: number,
+    pageSize?: number,
+  ): Promise<{ count: number; page: number; pageSize: number; sounds: FsSound[] }>;
+  analysis(soundId: string | number, descriptors?: string): Promise<Record<string, number | string | number[]>>;
+}
+
+const defaultBackend: FreesoundBackendLike = {
+  status: (probe) => fetchFreesoundStatus(probe ?? 'auto'),
+  search: freesoundSearch,
+  similar: freesoundSimilar,
+  analysis: freesoundAnalysis,
+};
+
 export class FreesoundProvider implements SoundLibraryProvider {
   readonly id = 'freesound' as const;
   readonly label = 'Freesound';
@@ -161,6 +150,7 @@ export class FreesoundProvider implements SoundLibraryProvider {
     search: true,
     metadataSearch: true,
     preview: true,
+    // original-quality download needs an OAuth2 bearer on the server
     download: 'oauth',
     licenseMetadata: true,
     attribution: true,
@@ -171,62 +161,59 @@ export class FreesoundProvider implements SoundLibraryProvider {
     offline: false,
   };
 
-  constructor(private creds: () => FreesoundCredentials) {}
+  private cachedStatus: { at: number; status: ProviderStatus } | null = null;
+  private lastRemote: FreesoundStatus | null = null;
 
-  status(): ProviderStatus {
-    const c = this.creds();
-    const tokenOk = c.apiToken.trim().length > 0;
-    const oauthOk = c.accessToken.trim().length > 0 && c.expiresAt > Date.now();
-    let reason: string | null = null;
-    if (!tokenOk) reason = 'No API token configured — enter it in Settings → Sound Libraries → Freesound (token auth covers search + preview).';
-    else if (!oauthOk) reason = 'Preview workflow ready. OAuth2 (original quality) not configured yet.';
-    return {
-      provider: this.id,
-      label: this.label,
-      online: true,
-      ready: tokenOk,
-      reason,
-      capabilities: this.capabilities,
-    };
+  constructor(private backend: FreesoundBackendLike = defaultBackend) {}
+
+  /* --------------------------------------------------------- status --- */
+
+  /**
+   * Ask the backend whether Freesound is configured and reachable.
+   * The browser learns "configured / connected" — never the key.
+   */
+  async status(opts: { force?: boolean } = {}): Promise<ProviderStatus> {
+    if (!opts.force && this.cachedStatus && Date.now() - this.cachedStatus.at < STATUS_CACHE_MS) {
+      return this.cachedStatus.status;
+    }
+    let status: ProviderStatus;
+    try {
+      const remote = await this.backend.status('auto');
+      this.lastRemote = remote;
+      status = providerStatusFromRemote(remote, this.capabilities);
+    } catch (e) {
+      status = providerStatusFromError(e, this.capabilities);
+    }
+    this.cachedStatus = { at: Date.now(), status };
+    return status;
+  }
+
+  /** Force a live re-check (the "re-test connection" button in Settings). */
+  async refreshStatus(): Promise<ProviderStatus> {
+    this.cachedStatus = null;
+    try {
+      const remote = await this.backend.status('always');
+      this.lastRemote = remote;
+      const status = providerStatusFromRemote(remote, this.capabilities);
+      this.cachedStatus = { at: Date.now(), status };
+      return status;
+    } catch (e) {
+      const status = providerStatusFromError(e, this.capabilities);
+      this.cachedStatus = { at: Date.now(), status };
+      return status;
+    }
+  }
+
+  /** Raw backend status (quality level, key source) for the settings UI. */
+  remoteStatus(): FreesoundStatus | null {
+    return this.lastRemote;
   }
 
   sourcePageUrl(asset: LibraryAsset): string {
     return asset.sourceUrl || `https://freesound.org/sounds/${asset.soundId}/`;
   }
 
-  /* ------------------------------------------------------------ HTTP -- */
-
-  private async call<T>(path: string, params: Record<string, string | undefined> = {}, init?: RequestInit): Promise<T> {
-    const c = this.creds();
-    const url = new URL(`${API}${path}`);
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== '' && v !== null) url.searchParams.set(k, v);
-    }
-    // token via query param (docs) — avoids Authorization header entirely
-    if (c.apiToken) url.searchParams.set('token', c.apiToken);
-    const res = await fetch(url.toString(), init);
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const j = (await res.json()) as { detail?: string; error?: string };
-        detail = j.detail ?? j.error ?? '';
-      } catch {
-        /* body not JSON */
-      }
-      const err = new Error(
-        res.status === 401 || res.status === 403
-          ? `Freesound authentication failed (${res.status})${detail ? `: ${detail}` : ''}.`
-          : res.status === 429
-            ? `Freesound rate limit reached (${res.status}). Wait a moment and try again.`
-            : `Freesound API error ${res.status}${detail ? `: ${detail}` : ''}.`,
-      );
-      (err as Error & { status?: number }).status = res.status;
-      throw err;
-    }
-    return (await res.json()) as T;
-  }
-
-  /* --------------------------------------------------------- search -- */
+  /* --------------------------------------------------------- search --- */
 
   async search(intent: RetrievalIntent, opts: SearchOptions = {}): Promise<RetrievalSearchResult> {
     const started = performance.now();
@@ -242,21 +229,11 @@ export class FreesoundProvider implements SoundLibraryProvider {
     // foley requests instead of mood sentences
     const q = expandQuery(query, intent.role);
     try {
-      const data = await this.call<FsSearchResponse>(SEARCH_PATH, {
-        query: q,
-        fields: SEARCH_FIELDS,
-        page: String(page),
-        page_size: '30',
-        filter: filters.length ? filters.join(' ') : undefined,
-        sort: 'score',
-      });
-      const assets = (data.results ?? []).map((s) =>
-        freesoundToAsset(s, 'preview', `fs-${s.id}-preview`),
-      );
-      const result = buildResult(intent, assets, data.count ?? 0, page, 'metadata', started);
-      return result;
+      const data = await this.backend.search({ query: q, filters, page, pageSize: 30, sort: 'score' });
+      const assets = (data.sounds ?? []).map((s) => freesoundToAsset(s, 'preview', `fs-${s.id}-preview`));
+      return buildResult(intent, assets, data.count ?? 0, page, 'metadata', started);
     } catch (e) {
-      return buildResult(intent, [], 0, page, 'metadata', started, (e as Error).message);
+      return buildResult(intent, [], 0, page, 'metadata', started, messageFor(e));
     }
   }
 
@@ -269,143 +246,175 @@ export class FreesoundProvider implements SoundLibraryProvider {
       filters.push(`duration:[${lo} TO ${hi}]`);
     }
     try {
-      const data = await this.call<FsSearchResponse>(SEARCH_PATH, {
+      const data = await this.backend.search({
         query: expandQuery(intent.query, intent.role),
-        fields: SEARCH_FIELDS,
-        page: String(page),
-        page_size: '30',
-        filter: filters.length ? filters.join(' ') : undefined,
+        filters,
+        page,
+        pageSize: 30,
         sort: 'score',
       });
-      const assets = (data.results ?? []).map((s) => freesoundToAsset(s, 'preview', `fs-${s.id}-preview`));
+      const assets = (data.sounds ?? []).map((s) => freesoundToAsset(s, 'preview', `fs-${s.id}-preview`));
       return buildResult(intent, assets, data.count ?? 0, page, 'metadata', started);
     } catch (e) {
-      return buildResult(intent, [], 0, page, 'metadata', started, (e as Error).message);
+      return buildResult(intent, [], 0, page, 'metadata', started, messageFor(e));
     }
   }
 
-  /* -------------------------------------------------- similar / AI --- */
+  /* -------------------------------------------------- similar / AI ---- */
 
   async similar(asset: LibraryAsset, page = 1): Promise<RetrievalSearchResult> {
     const started = performance.now();
     try {
-      const data = await this.call<FsSearchResponse>(`/sounds/${asset.soundId}/similar/`, {
-        fields: SEARCH_FIELDS,
-        page: String(page),
-        page_size: '20',
-        similarity_space: 'laion_clap',
-      });
-      const assets = (data.results ?? []).map((s) => freesoundToAsset(s, 'preview', `fs-${s.id}-preview`));
+      const data = await this.backend.similar(asset.soundId, page, 20);
+      const assets = (data.sounds ?? []).map((s) => freesoundToAsset(s, 'preview', `fs-${s.id}-preview`));
       // similar() has no text intent; synthesize one so the UI still shows a
       // query source, and use the real provider similarity scores
       const intent: RetrievalIntent = {
         ...assetIntentForSimilar(asset),
         query: `similar to "${asset.title}"`,
       };
-      return buildResult(intent, assets, data.count ?? 0, page, 'freesound-laion-clap', started);
+      return buildResult(intent, assets, data.count ?? assets.length, page, 'freesound-laion-clap', started);
     } catch (e) {
       const intent = assetIntentForSimilar(asset);
-      return buildResult(intent, [], 0, page, 'freesound-laion-clap', started, (e as Error).message);
+      return buildResult(intent, [], 0, page, 'freesound-laion-clap', started, messageFor(e));
     }
   }
 
   async audioFeatures(asset: LibraryAsset): Promise<Record<string, number | string | number[]>> {
     if (!asset.soundId) return {};
     try {
-      const data = await this.call<Record<string, number | string | number[]>>(`/sounds/${asset.soundId}/analysis/`, {
-        fields: 'mfcc,bpm,spectral_centroid,zero_crossing_rate,log_attack_time,temporal_centroid,dynamic_range,warmth,sharpness,roughness',
-      });
-      return data;
+      return await this.backend.analysis(asset.soundId);
     } catch {
       return {};
     }
   }
 
-  /* -------------------------------------------------------- audio ---- */
+  /* --------------------------------------------------------- audio ---- */
 
+  /** Preview audio, proxied by the backend (no credential in the browser). */
   async fetchPreview(asset: LibraryAsset): Promise<PreviewFetch> {
-    const prep = asset.previewUrls ?? {};
-    const url =
-      prep['preview-hq-mp3'] ??
-      prep['preview-hq-ogg'] ??
-      prep['preview-lq-mp3'] ??
-      prep['preview-lq-ogg'];
-    if (!url) {
-      // fetch sound instance once to get previews
-      const s = await this.call<FsSound>(`/sounds/${asset.soundId}/`, { fields: 'previews,name,license' });
-      const pr = s.previews ?? {};
-      const u = pr['preview-hq-mp3'] ?? pr['preview-hq-ogg'] ?? pr['preview-lq-mp3'] ?? pr['preview-lq-ogg'];
-      if (!u) throw new Error('Freesound returned no preview URL for this sound.');
-      return this.fetchBlob(u);
-    }
+    const url = freesoundPreviewUrl(asset.soundId, preferredQuality(asset));
     return this.fetchBlob(url);
   }
 
+  /**
+   * Original-quality file. Freesound requires OAuth2 for it; the backend
+   * holds the bearer token. Without one this fails loudly — it never
+   * returns a preview dressed up as an original.
+   */
   async fetchOriginal(asset: LibraryAsset): Promise<PreviewFetch> {
-    const c = this.creds();
-    if (!c.accessToken || c.expiresAt < Date.now()) {
-      throw new Error('Original-quality download requires Freesound OAuth2 (Bearer token). Configure it or use the preview workflow.');
-    }
-    const res = await fetch(`${API}/sounds/${asset.soundId}/download/`, {
-      headers: { Authorization: `Bearer ${c.accessToken}` },
-    });
+    const res = await fetch(freesoundDownloadUrl(asset.soundId));
     if (!res.ok) {
-      throw new Error(`Freesound original download failed (${res.status}). Preview workflow is unaffected.`);
+      let message = `Freesound original download failed (${res.status}).`;
+      try {
+        const body = (await res.json()) as { error?: string; hint?: string; code?: string };
+        if (body.error) message = body.hint ? `${body.error} ${body.hint}` : body.error;
+      } catch {
+        /* non-JSON body */
+      }
+      throw new Error(message);
     }
     const blob = await res.blob();
     return { blob, mime: blob.type || 'audio/wav', bytes: blob.size };
   }
 
   private async fetchBlob(url: string): Promise<PreviewFetch> {
-    // plain GET — no custom headers, so no CORS preflight (previews return
-    // Access-Control-Allow-Origin: * on GET per Freesound's data servers)
-    const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
-    if (!res.ok) throw new Error(`Freesound preview download failed (${res.status}).`);
+    const res = await fetch(url);
+    if (!res.ok) {
+      let message = `Freesound preview download failed (${res.status}).`;
+      try {
+        const body = (await res.json()) as { error?: string; hint?: string };
+        if (body.error) message = body.hint ? `${body.error} ${body.hint}` : body.error;
+      } catch {
+        /* non-JSON body */
+      }
+      throw new Error(message);
+    }
     const blob = await res.blob();
     return { blob, mime: blob.type || 'audio/mpeg', bytes: blob.size };
   }
-
-  /* -------------------------------------------------------- OAuth ---- */
-
-  authorizeUrl(state: string): string {
-    const c = this.creds();
-    const u = new URL(`${API}/oauth2/authorize/`);
-    u.searchParams.set('client_id', c.clientId || '');
-    u.searchParams.set('response_type', 'code');
-    u.searchParams.set('state', state);
-    return u.toString();
-  }
-
-  async exchangeCode(code: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-    const c = this.creds();
-    const body = new URLSearchParams({
-      client_id: c.clientId,
-      client_secret: c.clientSecret,
-      grant_type: 'authorization_code',
-      code,
-    });
-    const res = await fetch(`${API}/oauth2/access_token/`, { method: 'POST', body });
-    if (!res.ok) throw new Error(`Freesound OAuth2 token exchange failed (${res.status}). Check client id / secret.`);
-    const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-    return { accessToken: j.access_token, refreshToken: j.refresh_token, expiresIn: j.expires_in };
-  }
-
-  async refreshAccessToken(): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-    const c = this.creds();
-    const body = new URLSearchParams({
-      client_id: c.clientId,
-      client_secret: c.clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: c.refreshToken,
-    });
-    const res = await fetch(`${API}/oauth2/access_token/`, { method: 'POST', body });
-    if (!res.ok) throw new Error(`Freesound OAuth2 refresh failed (${res.status}). Re-authorize.`);
-    const j = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-    return { accessToken: j.access_token, refreshToken: j.refresh_token, expiresIn: j.expires_in };
-  }
 }
 
-/* ------------------------------------------------------- helpers ---- */
+/* ------------------------------------------------------ status map ---- */
+
+function providerStatusFromRemote(remote: FreesoundStatus, capabilities: ProviderCapabilities): ProviderStatus {
+  if (remote.configured && remote.connected) {
+    return {
+      provider: 'freesound',
+      label: 'Freesound',
+      online: true,
+      ready: true,
+      reason: remote.oauth.quality === 'original'
+        ? 'Connected through the Umbra backend — search, preview and original-quality download.'
+        : 'Connected through the Umbra backend — search + preview (original quality needs an OAuth token on the server).',
+      capabilities,
+    };
+  }
+  if (remote.configured && remote.connected === false) {
+    return {
+      provider: 'freesound',
+      label: 'Freesound',
+      online: true,
+      ready: false,
+      reason: remote.reason ?? 'The backend reported an invalid Freesound API key.',
+      capabilities,
+    };
+  }
+  if (remote.configured) {
+    return {
+      provider: 'freesound',
+      label: 'Freesound',
+      online: true,
+      ready: false,
+      reason: remote.reason ?? 'Freesound connection state unknown — the backend could not reach it.',
+      capabilities,
+    };
+  }
+  return {
+    provider: 'freesound',
+    label: 'Freesound',
+    online: true,
+    ready: false,
+    reason:
+      remote.reason ??
+      'No Freesound API key on the backend. Add FREESOUND_API_KEY to .env and restart the backend.',
+    capabilities,
+  };
+}
+
+function providerStatusFromError(e: unknown, capabilities: ProviderCapabilities): ProviderStatus {
+  const message = messageFor(e);
+  const offline = e instanceof FreesoundBackendError && e.code === 'backend_offline';
+  return {
+    provider: 'freesound',
+    label: 'Freesound',
+    online: !offline,
+    ready: false,
+    reason: offline
+      ? 'The UMBRA backend is not running — Freesound retrieval goes through it. Start it with `python scripts/run_backend.py`.'
+      : message,
+    capabilities,
+  };
+}
+
+function messageFor(e: unknown): string {
+  if (e instanceof FreesoundBackendError) return e.detail();
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/* --------------------------------------------------------- helpers ---- */
+
+function preferredQuality(asset: LibraryAsset): string {
+  const have = asset.previewUrls ?? {};
+  return (
+    (have['preview-hq-mp3'] && 'preview-hq-mp3') ||
+    (have['preview-hq-ogg'] && 'preview-hq-ogg') ||
+    (have['preview-lq-mp3'] && 'preview-lq-mp3') ||
+    (have['preview-lq-ogg'] && 'preview-lq-ogg') ||
+    'preview-hq-mp3'
+  );
+}
 
 function expandQuery(query: string, role: RetrievalIntent['role']): string {
   const roleTerms: Partial<Record<RetrievalIntent['role'], string[]>> = {

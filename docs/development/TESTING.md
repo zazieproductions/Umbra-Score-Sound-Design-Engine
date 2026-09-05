@@ -12,7 +12,9 @@ python -m pytest backend/tests -q     # backend: 57 tests, zero model downloads
 
 | Suite | Proves | Does NOT prove |
 | --- | --- | --- |
-| `tests/library.acceptance.test.ts` (19) | Retrieval plumbing: intent→search→rank→license→cache→place→edit→replace→credits, against mocked Freesound HTTP + fake IndexedDB | Anything about the live Freesound API, real audio quality, or model inference |
+| `tests/library.acceptance.test.ts` (19) | Retrieval plumbing: intent→search→rank→license→cache→place→edit→replace→credits, against mocked Freesound HTTP (now mocked at the `/api/integrations/freesound/*` backend seam) + fake IndexedDB | Anything about the live Freesound API, real audio quality, or model inference |
+| `tests/freesound.backend.test.ts` (12) | The browser never holds or sends a Freesound credential: requests stay on the app origin, nothing is written to localStorage, and configured/rejected/offline states are reported honestly | The backend's own HTTP layer (covered by the backend suite) |
+| `backend/tests/test_freesound_integration.py` (21) | Server-side Freesound integration: `.env` loading, status/config/probe, header auth, search/metadata/similar/analysis, preview proxy + host allowlist, OAuth-required download, error mapping, and that no response or log contains the key | Requests against the real freesound.org (mocked with `httpx.MockTransport`) |
 | `tests/architecture.invariants.test.ts` | Structural invariants: CLAP advertises no generation caps, procedural needs no backend, clip providers come from the canonical enum, retrieval conversion keeps provenance | Runtime behavior |
 | `backend/tests/test_backend.py` (57) | Real-audio contract (decode-before-register), capability honesty, prompt/payload mapping, routing, job lifecycle | Any model weights, hardware, or real inference |
 | `backend/tests/test_invariants.py` | Cross-cutting backend invariants (CLAP ⊆ search caps, procedural is described-not-rendered, failures carry hints) | Runtime behavior |
@@ -26,6 +28,9 @@ See `../architecture/PROVIDERS.md`.
   reports real torch/CUDA/MPS/CPU, `verify_environment.py` output matches the UI.
 - Retrieval against the **live** Freesound API with a Level 1 token: the same
   acceptance tests run unchanged (code paths identical; HTTP layer unmocked).
+  Verify the credential first with
+  `GET /api/integrations/freesound/status?probe=always` — see
+  [`FREESOUND.md`](FREESOUND.md).
 
 ## Tier 3 — runtime acceptance (requires hardware + weights, manual, opt-in)
 

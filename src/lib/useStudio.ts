@@ -29,11 +29,11 @@ import { useGeneration } from './useGeneration';
 import type { GenerateRequest } from './providers';
 // Library imports — preserve PR7 retrieval completely
 import { RetrievalService, type AutoPlacementDetail } from './library/service';
-import { soundCache, provenanceStore, credsStore, settingsStore, shortId } from './library/cache';
+import { soundCache, provenanceStore, purgeLegacyFreesoundCredentials, settingsStore, shortId } from './library/cache';
 import { exportCreditsJson, exportCreditsTxt, downloadText } from './library/credits';
 import { analyzeVideoUrl, condenseEvents, type EventEnvironment } from './library/videoAnalysis';
-import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundCredentials, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
-import { EMPTY_FREESOUND_CREDS, DEFAULT_LIBRARY_SETTINGS } from './library/types';
+import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundConnection, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
+import { EMPTY_FREESOUND_CONNECTION, DEFAULT_LIBRARY_SETTINGS } from './library/types';
 import { tc } from './format';
 
 export interface LogLine {
@@ -74,15 +74,18 @@ export function useStudio() {
   const [hasSavedDraft, setHasSavedDraft] = useState(false);
 
   /* -------------------------------------------------- sound library -- */
-  const [creds, setCreds] = useState<FreesoundCredentials>(() =>
-    credsStore.load('umbra.library.freesound.creds.v1', EMPTY_FREESOUND_CREDS),
-  );
+  /**
+   * Freesound connection state, mirrored from the backend. There is no
+   * credential here — the browser only knows whether the backend has a key
+   * and whether Freesound accepted it.
+   */
+  const [freesoundConnection, setFreesoundConnection] = useState<FreesoundConnection>(EMPTY_FREESOUND_CONNECTION);
   const [libSettings, setLibSettingsState] = useState<LibrarySettings>(() =>
     settingsStore.load<LibrarySettings>(DEFAULT_LIBRARY_SETTINGS),
   );
   const serviceRef = useRef<RetrievalService | null>(null);
   // eslint-disable-next-line react-hooks/refs -- lazy service init: created once, never reassigned
-  if (!serviceRef.current) serviceRef.current = new RetrievalService(() => creds, libSettings);
+  if (!serviceRef.current) serviceRef.current = new RetrievalService(libSettings);
   const [retrieval, setRetrieval] = useState<RetrievalState>({
     busy: false,
     intent: null,
@@ -113,13 +116,26 @@ export function useStudio() {
     });
   }, []);
 
-  const saveCreds = useCallback((patch: Partial<FreesoundCredentials>) => {
-    setCreds((c) => {
-      const next = { ...c, ...patch };
-      credsStore.save('umbra.library.freesound.creds.v1', next);
-      return next;
+  /**
+   * Ask the backend how Freesound stands. `force` triggers a live probe of
+   * the key instead of reusing the backend's 60 s cache.
+   */
+  const refreshFreesoundStatus = useCallback(async (force = false) => {
+    const provider = lib.freesound;
+    const status = force ? await provider.refreshStatus() : await provider.status({ force: true });
+    const remote = provider.remoteStatus();
+    setFreesoundConnection({
+      configured: remote?.configured ?? false,
+      connected: remote?.connected ?? null,
+      keySource: remote?.keySource ?? null,
+      quality: remote?.oauth.quality ?? 'preview',
+      reason: status.reason ?? remote?.reason ?? null,
+      hint: remote?.hint ?? null,
+      probed: remote?.probed ?? false,
+      loaded: true,
     });
-  }, []);
+    return status;
+  }, [lib]);
 
   const log = useCallback((text: string, level: LogLine['level'] = 'info') => {
     setLogs((prev) => [{ id: `lg${logSeq++}`, at: Date.now(), level, text }, ...prev].slice(0, 120));
@@ -130,6 +146,18 @@ export function useStudio() {
   useEffect(() => {
     void provenanceStore.list().then(() => setLibraryLoaded(true));
     try { setFavorites(JSON.parse(localStorage.getItem('umbra.library.favorites') ?? '[]').length); } catch { setFavorites(0); }
+    // The Freesound key moved to the backend: drop any copy an older build
+    // left in this browser profile, then mirror the backend's status.
+    const purged = purgeLegacyFreesoundCredentials();
+    if (purged.length > 0) {
+      log(
+        `removed ${purged.length} legacy Freesound credential(s) from this browser — the API key now lives in the backend .env only`,
+        'warn',
+      );
+    }
+    void refreshFreesoundStatus();
+    // mount-only by design: the purge and the first status mirror run once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -1125,9 +1153,9 @@ export function useStudio() {
     continueClip,
     repaintClip,
     regenerateClip,
-    // sound library — preserved from PR7
-    creds,
-    saveCreds,
+    // sound library — credentials live on the backend, never in the browser
+    freesoundConnection,
+    refreshFreesoundStatus,
     libSettings,
     setSettingsPatch,
     setLicensePolicy,
@@ -1157,7 +1185,7 @@ export function useStudio() {
     soundEvents: project?.soundEvents ?? [],
     soundAnalysis: project?.soundAnalysis ?? null,
     reanalyzeVideo,
-    providerStatuses: () => lib.providers().map((p) => p.status()),
+    providerStatuses: async () => Promise.all(lib.providers().map((p) => p.status())),
     // --- draft persistence -------------------------------------------------
     savedAt,
     saveState,

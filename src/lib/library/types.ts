@@ -469,29 +469,44 @@ export const DEFAULT_LIBRARY_SETTINGS: LibrarySettings = {
   maxSearchesPerRun: 10,
 };
 
-/* -------------------------------------------------- credentials ------ */
+/* ---------------------------------------------- connection state ------ */
 
-/** Never written to Git. Local-only (localStorage), shown masked in UI. */
-export interface FreesoundCredentials {
-  apiToken: string;
-  clientId: string;
-  clientSecret: string;
-  redirectUri: string;
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;      // epoch ms
-  user: string | null;
+/**
+ * Freesound connection state, as reported by the backend.
+ *
+ * There is deliberately NO credential in this type. The API key lives in the
+ * backend process only (`FREESOUND_API_KEY` in a git-ignored `.env`); the
+ * browser learns whether the integration is configured and whether Freesound
+ * accepted the key. Nothing secret is ever stored in localStorage, IndexedDB
+ * or the bundle.
+ */
+export interface FreesoundConnection {
+  /** A key is present in the backend environment. */
+  configured: boolean;
+  /** true = key accepted · false = key rejected · null = unknown (not probed / unreachable). */
+  connected: boolean | null;
+  /** Where the backend read the key from, e.g. `environment:FREESOUND_API_KEY`. */
+  keySource: string | null;
+  /** `preview` until the backend also holds an OAuth2 token. */
+  quality: 'preview' | 'original';
+  /** Human-readable reason — the backend's own words when something is off. */
+  reason: string | null;
+  hint: string | null;
+  /** Whether the backend actually probed Freesound for this answer. */
+  probed: boolean;
+  /** false until the first status call resolves (backend may not be running). */
+  loaded: boolean;
 }
 
-export const EMPTY_FREESOUND_CREDS: FreesoundCredentials = {
-  apiToken: '',
-  clientId: '',
-  clientSecret: '',
-  redirectUri: '',
-  accessToken: '',
-  refreshToken: '',
-  expiresAt: 0,
-  user: null,
+export const EMPTY_FREESOUND_CONNECTION: FreesoundConnection = {
+  configured: false,
+  connected: null,
+  keySource: null,
+  quality: 'preview',
+  reason: null,
+  hint: null,
+  probed: false,
+  loaded: false,
 };
 
 export interface SpottingEvent {

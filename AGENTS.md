@@ -55,6 +55,7 @@ When documents disagree, this order wins:
 | Why the architecture is shaped this way | `docs/decisions/` (ADRs) |
 | How to add a provider / feature | `docs/development/ADDING_A_PROVIDER.md`, `ADDING_A_FEATURE.md` |
 | Commands, setup, testing, debugging | `docs/development/` |
+| Freesound API key / server-side credentials | `docs/development/FREESOUND.md` |
 
 **Canonical domain types** — never define a second version of these:
 
@@ -89,6 +90,12 @@ When documents disagree, this order wins:
     Separate editable objects, always.
 11. **Provider failures fail loudly.** No silent fallback to fake output, no
     synthetic filler masquerading as a model result.
+12. **Third-party credentials are server-side only.** An external API key (e.g.
+    Freesound's) is read from the environment by `backend/integrations/` and is
+    never placed in `src/`, `localStorage`, IndexedDB, a `VITE_` variable, a
+    test fixture, a doc, a log or a commit. Endpoints report *configured* and
+    *connected* — never the value. `.env` is git-ignored; `.env.example`
+    carries names only.
 
 ## 6. Change discipline
 
