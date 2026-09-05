@@ -1,3 +1,19 @@
+/* ==================================================================== *
+ *  REALTIME MONITOR ENGINE (ScoreEngine)
+ *
+ *  Owns:
+ *    live Web Audio playback — procedural voices + scheduled AudioClips
+ *    through the shared master chain (dsp.ts), transport sync, metering.
+ *
+ *  Does not own:
+ *    project state (useStudio.ts) · offline bounce (render.ts) ·
+ *    clip decode/scheduling primitives (clips.ts) · inference (backend).
+ *
+ *  Invariant:
+ *    the monitor and the offline renderer build the SAME graph from the
+ *    same dsp.ts primitives, so what you hear is what gets exported.
+ * ==================================================================== */
+
 import { buildMaster, DEFAULT_MASTER, f32, type MasterChain, type MasterParams } from './dsp';
 import { buildVoice, type Voice } from './voices';
 import { clipEnd, loadClipBuffer, scheduleClip, type ClipVoice } from './clips';

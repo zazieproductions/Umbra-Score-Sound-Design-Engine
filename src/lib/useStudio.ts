@@ -1,3 +1,21 @@
+/* ==================================================================== *
+ *  PROJECT STATE (useStudio)
+ *
+ *  Owns:
+ *    the Project object, transport, clip editing (move/trim/split/
+ *    fade/gain/pan/mute/solo), export orchestration, and wiring the
+ *    library retrieval service into the timeline.
+ *
+ *  Does not own:
+ *    audio rendering (audio.ts / render.ts) · provider HTTP (useGeneration
+ *    + providers.ts) · retrieval ranking/caching (lib/library/).
+ *
+ *  Invariant:
+ *    every audible timeline object is an AudioClip (lib/types.ts).
+ *    Retrieval results are converted at the boundary and never stored
+ *    in their raw provider shape.
+ * ==================================================================== */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AudioClip, Layer, LayerKind, Project, RenderJob, Scene } from './types';
 import { soundClipToAudioClip } from './types';
