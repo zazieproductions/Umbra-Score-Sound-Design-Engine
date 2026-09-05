@@ -10,7 +10,7 @@
  *  the monitor is what lands in the exported master.
  * ==================================================================== */
 
-import { biquad, gainNode, type MasterChain } from './dsp';
+import { biquad, dbToGain, gainNode, type MasterChain } from './dsp';
 import type { AudioClip, ClipProvider } from './types';
 
 /* ------------------------------------------------------------ decode cache */
@@ -80,6 +80,83 @@ export interface ClipVoice {
   dispose(): void;
 }
 
+/* ------------------------------------------------- derived clip buffers -- */
+
+const reversedBufs = new WeakMap<AudioBuffer, AudioBuffer>();
+const loopBufs = new WeakMap<AudioBuffer, AudioBuffer>();
+
+/** Time-reversed copy (the cached source asset is never mutated). */
+function reversedBuffer(ctx: BaseAudioContext, src: AudioBuffer): AudioBuffer {
+  const hit = reversedBufs.get(src);
+  if (hit && hit.sampleRate === ctx.sampleRate) return hit;
+  const out = ctx.createBuffer(src.numberOfChannels, src.length, ctx.sampleRate);
+  for (let c = 0; c < src.numberOfChannels; c++) {
+    const d = src.getChannelData(c);
+    const o = out.getChannelData(c);
+    for (let i = 0; i < d.length; i++) o[i] = d[d.length - 1 - i];
+  }
+  reversedBufs.set(src, out);
+  return out;
+}
+
+/** Loop-splice copy: tail crossfades into the head so loops do not click. */
+function crossfadeLoopBuffer(ctx: BaseAudioContext, src: AudioBuffer, crossfadeSec = 0.5): AudioBuffer {
+  const hit = loopBufs.get(src);
+  if (hit && hit.sampleRate === ctx.sampleRate) return hit;
+  const xf = Math.min(src.length - 1, Math.floor(ctx.sampleRate * crossfadeSec));
+  const len = src.length;
+  const out = ctx.createBuffer(src.numberOfChannels, len, ctx.sampleRate);
+  for (let c = 0; c < src.numberOfChannels; c++) {
+    const inD = src.getChannelData(c);
+    const outD = out.getChannelData(c);
+    outD.set(inD);
+    for (let i = 0; i < xf; i++) {
+      const t = i / xf;
+      const tailIn = inD[len - xf + i];
+      const headOut = outD[i] * Math.sin((Math.PI / 2) * t);
+      outD[i] = headOut + tailIn * Math.cos((Math.PI / 2) * t);
+    }
+  }
+  loopBufs.set(src, out);
+  return out;
+}
+
+/* ------------------------------------------------ transform semantics -- */
+
+/**
+ * A clip only needs the transform graph when at least one transform field
+ * actually deviates from neutral. This keeps the default path for generated
+ * cues byte-identical (no extra nodes, no rate scaling).
+ */
+export function isTransformActive(t?: AudioClip['transform']): boolean {
+  if (!t) return false;
+  return (
+    t.playbackRate !== 1 ||
+    t.pitch !== 0 ||
+    t.reverse ||
+    t.lowpassHz != null ||
+    t.highpassHz != null ||
+    t.reverb > 0 ||
+    t.gainDb !== 0 ||
+    t.loop ||
+    t.crossfadeLoop ||
+    t.slowModulate > 0
+  );
+}
+
+/** Playback rate the transform imposes, or 1 when inactive. */
+export function clipTransformRate(c: AudioClip): number {
+  return isTransformActive(c.transform) ? Math.max(0.05, c.transform?.playbackRate || 1) : 1;
+}
+
+/**
+ * Convert a *timeline* trim offset into *buffer* seconds for a transformed
+ * clip. Offsets elsewhere in the codebase are expressed at unit rate.
+ */
+export function clipBufferOffset(timelineSec: number, c: AudioClip): number {
+  return timelineSec * clipTransformRate(c);
+}
+
 /**
  * Build a clip's channel strip and schedule it.
  *
@@ -87,6 +164,11 @@ export interface ClipVoice {
  * with the procedural bed — a generated cue sits *inside* the mix rather than
  * floating on top of it. Sound-design clips join the un-ducked bus so their
  * transients survive.
+ *
+ * A clip.transform (retrieved-sound processing: rate, pitch, reverse, LP/HP,
+ * slow modulation, loop, reverb send, gain trim) is applied HERE, in the one
+ * graph shared by the live monitor and the offline bounce — so the transform
+ * controls are audible and the export matches the monitor.
  */
 export function scheduleClip(
   master: MasterChain,
@@ -95,25 +177,69 @@ export function scheduleClip(
   opts: { at: number; offset: number; duration: number; masterTime?: boolean } ,
 ): ClipVoice {
   const ctx = master.ctx;
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
+  const tr = clip.transform;
+  const transform = isTransformActive(tr);
+  const rate = clipTransformRate(clip);
 
+  const source = ctx.createBufferSource();
+  let base = transform && tr!.reverse ? reversedBuffer(ctx, buffer) : buffer;
+  if (tr?.loop && tr.crossfadeLoop) base = crossfadeLoopBuffer(ctx, base, 0.5);
+  source.buffer = base;
+  if (transform) {
+    source.playbackRate.value = rate;
+    source.detune.value = (tr?.pitch ?? 0) * 100;
+  }
+  source.loop = !!tr?.loop;
+
+  const nodes: AudioNode[] = [source];
   const hp = biquad(ctx, 'highpass', 18, 0.7);
   const panner = ctx.createStereoPanner();
   panner.pan.value = Math.max(-1, Math.min(1, clip.pan));
   const fader = gainNode(ctx, 0);
 
-  source.connect(hp);
+  // transform filters: source → hp? → lp? → pan → fader
+  let head: AudioNode = source;
+  if (transform && tr!.highpassHz != null) {
+    const f = biquad(ctx, 'highpass', tr!.highpassHz as number, 0.8);
+    head.connect(f);
+    head = f;
+    nodes.push(f);
+  }
+  if (transform && tr!.lowpassHz != null) {
+    const f = biquad(ctx, 'lowpass', tr!.lowpassHz as number, 0.9);
+    head.connect(f);
+    head = f;
+    nodes.push(f);
+  }
+  head.connect(hp);
   hp.connect(panner);
   panner.connect(fader);
+  nodes.push(hp, panner, fader);
 
   // Musical material rides the ducked music bus; designed sound does not.
   const musical = clip.provider === 'ace-step';
   fader.connect(musical ? master.musicSum : master.hitSum);
 
-  const level = clip.muted ? 0 : Math.max(0, clip.gain);
+  // Optional clip-level reverb send (transform.reverb). Taps post-fader so
+  // the wet level follows the clip level; the master convolvers do the work.
+  if (transform && tr!.reverb > 0) {
+    const send = tr!.reverb * 0.8;
+    const defs: [number, GainNode][] = [
+      [send * 0.7, master.sendRoom],
+      [send * 0.4, master.sendHall],
+      [send * 0.25, master.sendCath],
+    ];
+    for (const [value, dest] of defs) {
+      const sg = gainNode(ctx, value);
+      fader.connect(sg);
+      sg.connect(dest);
+      nodes.push(sg);
+    }
+  }
+
+  const level = (clip.muted ? 0 : Math.max(0, clip.gain)) * (transform ? dbToGain(tr!.gainDb) : 1);
   const at = Math.max(0, opts.at);
-  const dur = Math.max(0.01, opts.duration);
+  const dur = Math.max(0.01, opts.duration); // timeline seconds
   const fadeIn = Math.max(0.002, Math.min(clip.fadeIn, dur * 0.5));
   const fadeOut = Math.max(0.002, Math.min(clip.fadeOut, dur * 0.5));
 
@@ -124,7 +250,29 @@ export function scheduleClip(
   g.setValueAtTime(level, at + dur - fadeOut);
   g.linearRampToValueAtTime(0, at + dur);
 
-  source.start(at, Math.max(0, opts.offset), dur);
+  // slow amplitude breathing (transform.slowModulate), like the legacy strip
+  let lfo: OscillatorNode | null = null;
+  let lfoAmt: GainNode | null = null;
+  if (transform && (tr!.slowModulate ?? 0) > 0 && level > 1e-4) {
+    lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.032 + (tr!.slowModulate ?? 0) * 0.09;
+    lfoAmt = gainNode(ctx, (tr!.slowModulate ?? 0) * 0.22);
+    lfo.connect(lfoAmt);
+    lfoAmt.connect(g);
+  }
+
+  const offset = Math.max(0, opts.offset);
+  if (tr?.loop) {
+    source.start(at, Math.min(offset, Math.max(0, base.duration - 0.02)));
+    source.stop(at + dur);
+  } else {
+    const window = Math.min(
+      Math.max(0.02, dur * rate),
+      Math.max(0.02, base.duration - offset),
+    );
+    source.start(at, Math.min(offset, Math.max(0, base.duration - 0.02)), window);
+  }
+  if (lfo) lfo.start(at);
 
   return {
     source,
@@ -137,9 +285,14 @@ export function scheduleClip(
       } catch {
         /* already stopped */
       }
+      try {
+        lfo?.stop(when + 0.2);
+      } catch {
+        /* already stopped */
+      }
     },
     dispose() {
-      [source, hp, panner, fader].forEach((n) => {
+      nodes.forEach((n) => {
         try {
           n.disconnect();
         } catch {

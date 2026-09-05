@@ -1,9 +1,13 @@
 /* ==================================================================== *
- *  UMBRA · RETRIEVED CLIP AUDIO (live + offline)
+ *  UMBRA · RETRIEVED CLIP AUDIO (live + offline)  —  LEGACY
  *
- *  Plays cached library audio through the same channel strip as
- *  generated voices — so a retrieved clip is a real, editable, mixed
- *  element: gain, pan, fades, filters, rate/pitch, reverb sends, loop.
+ *  Superseded by the unified path: src/lib/clips.ts `scheduleClip` is the
+ *  single graph shared by the live monitor and the offline bounce and now
+ *  applies clip.transform itself. This module's voice builder was the first
+ *  TransformSpec implementation but nothing imports it any more
+ *  (makeClipScheduler/pollClips/buildClipVoice have no callers); keep it
+ *  only as the reference implementation until the transform semantics are
+ *  fully covered by tests, then delete it.
  *
  *  NONDESTRUCTIVE: the original blob in the cache is never modified.
  *  Reverse and crossfade-loop use derived in-memory buffers only.
