@@ -39,23 +39,28 @@ adapters, scene+spotting planner, video/waveform analysis, audio store
 | mmaudio | Adapter, real-or-UNAVAILABLE | NOT runtime-verified here |
 | clap | Embeddings/search adapter | NOT runtime-verified here |
 | library (Freesound/user/Pixabay) | Retrieval subsystem | Verified at plumbing level: 19/19 mocked acceptance tests |
+| xclip (analysis, not a provider) | `backend/analysis/xclip.py` — optional semantic WHAT layer over pixel events | NOT runtime-verified here (no torch/transformers/ffmpeg/weights in this environment). Mock-inference + vocab/cache/API tests green. |
 
 ## Runtime status
 
 No Tier 3 (hardware + weights) acceptance has passed in this environment.
 The end-to-end hardware gate (D-minor/44 BPM/12 s → file → timeline → master)
-remains open by design — CI never downloads weights.
+remains open by design — CI never downloads weights. The optional X-CLIP
+semantic layer is likewise **not runtime-verified** here (no torch/transformers
+weights/ffmpeg); `scripts/verify_xclip.py` is the manual Tier-3 gate.
 
 ## Test counts
 
-- Frontend: 123 (`npm test`) — 19 retrieval acceptance + 6 architecture
-  invariants + 20 quality-measurement units + 6 rendered gates exercising the
-  real engine through headless Web Audio (4 audio-QA + 2 stem-delivery
-  equivalence: shared frameCount + Σ-stems-null on genuine convolvers;
-  `node-web-audio-api`, skip-not-fail when the addon cannot load) +
+- Frontend: 150 (`npm test`, 6 skipped) — 19 retrieval acceptance + 6
+  architecture invariants + 20 quality-measurement units + 6 rendered gates
+  exercising the real engine through headless Web Audio (4 audio-QA + 2
+  stem-delivery equivalence: shared frameCount + Σ-stems-null on genuine
+  convolvers; `node-web-audio-api`, skip-not-fail when the addon cannot load) +
   72 export-delivery (clock 6, stemPlan 27, kernel A/B/C/G 8, WAV/BWF 10,
-  manifest 6, preflight+ZIP 10, loudness/boundaries 5).
-- Backend: 66 (`pytest backend/tests -q`), no downloads
+  manifest 6, preflight+ZIP 10, loudness/boundaries 5) + 9 X-CLIP bridge tests.
+- Backend: 91 passed, 2 skipped (`pytest backend/tests -q`), no downloads —
+  includes 17 X-CLIP tests (vocabulary, pure helpers, normalization, event
+  attachment, cache, missing-model honesty, mocked inference, API routes).
 - `tsc -b` clean · `eslint` clean · `vite build` clean
 
 ## Audio quality gates
@@ -78,8 +83,8 @@ oscillators across all pitched/transient voices (no fold-back aliasing).
   `stemRender`/`delivery` (OfflineAudioContext) is likewise untested here —
   the node test env stubs no OfflineAudioContext by design.
 
-- Backend optional extras (torch, diffusers, CLAP, PySceneDetect) not installed
-  in lightweight envs — providers honestly report unavailable.
+- Backend optional extras (torch, diffusers, CLAP, PySceneDetect, X-CLIP) not
+  installed in lightweight envs — providers/analysis honestly report unavailable.
 - `ffmpeg` external binary required for video metadata/thumbnails.
 - Live Freesound calls need a user token (in-app settings, IndexedDB).
 - Legacy `SoundClip` still present at the retrieval boundary (compat shims in
@@ -112,9 +117,9 @@ alignment, export loudness conformance tests, docs drift checks.
 
 ## Last verified
 
-- **Date:** 2026-09-05 · **base commit:** `0d78a15` · **branch:**
-  `arena/01a072fd-umbra-score-sound-design-engin`
-- Frontend: `npm run verify` green (typecheck + eslint + 45 pass / 4 skip) ·
-  `npm run build` green · rendered QA 49/49 with the headless engine + ALSA stub
-- Backend: `pytest backend/tests` 66 passed, no downloads
-- Runtime provider verification: none in this environment (see table above)
+- **Date:** 2026-09-05 · **branch:** `arena/01a073ad-umbra-score-sound-design-engin`
+- Frontend: `npm run verify` green (typecheck + eslint + 150 pass / 6 skip) ·
+  `npm run build` green
+- Backend: `pytest backend/tests` 91 passed, 2 skipped, no downloads
+- Runtime provider verification: none in this environment (see table above). X-CLIP
+  likewise NOT runtime-verified here — `scripts/verify_xclip.py` is the gate.

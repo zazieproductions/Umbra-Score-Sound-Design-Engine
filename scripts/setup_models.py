@@ -12,6 +12,7 @@ Usage::
     python scripts/setup_models.py --ace-step-base # + base checkpoint (continuation)
     python scripts/setup_models.py --stable-audio  # Stable Audio Open 1.0
     python scripts/setup_models.py --clap          # CLAP semantic search
+    python scripts/setup_models.py --xclip         # X-CLIP semantic video analysis
     python scripts/setup_models.py --list          # show what is already local
 
 Licences differ per model and some are gated. See THIRD_PARTY_MODELS.md — you
@@ -39,6 +40,7 @@ OPTIONAL_REPOS = {
     "ace-step-lm-small": ("ACE-Step/acestep-5Hz-lm-0.6B", "acestep-5Hz-lm-0.6B"),
     "stable-audio": ("stabilityai/stable-audio-open-1.0", "stable-audio-open-1.0"),
     "clap": ("laion/clap-htsat-unfused", "clap-htsat-unfused"),
+    "xclip": ("microsoft/xclip-base-patch32", "xclip-base-patch32"),
 }
 
 LICENCE_NOTES = {
@@ -53,6 +55,11 @@ LICENCE_NOTES = {
         "revenue threshold requires an enterprise licence."
     ),
     "clap": "CLAP (laion/clap-htsat-unfused) — check the model card for its licence terms.",
+    "xclip": (
+        "X-CLIP (microsoft/xclip-base-patch32) — MIT licence per the model card. "
+        "Weights live in git-ignored checkpoints/xclip-base-patch32; analysis results "
+        "are cached in git-ignored models/cache/xclip."
+    ),
 }
 
 
@@ -164,6 +171,7 @@ def main() -> int:
     )
     parser.add_argument("--stable-audio", action="store_true", help="Stable Audio Open 1.0 (gated)")
     parser.add_argument("--clap", action="store_true", help="CLAP semantic search")
+    parser.add_argument("--xclip", action="store_true", help="X-CLIP semantic video analysis")
     parser.add_argument("--all", action="store_true", help="everything above")
     parser.add_argument("--list", action="store_true", help="show local state and exit")
     parser.add_argument("--dir", type=str, default=None, help="override checkpoints directory")
@@ -172,7 +180,7 @@ def main() -> int:
     root = Path(args.dir).expanduser() if args.dir else model_manager.checkpoints_root()
 
     if args.list or not any(
-        [args.core, args.ace_step, args.ace_step_base, args.stable_audio, args.clap, args.all]
+        [args.core, args.ace_step, args.ace_step_base, args.stable_audio, args.clap, args.xclip, args.all]
     ):
         show_list(root)
         if not args.list:
@@ -188,6 +196,8 @@ def main() -> int:
         failures += install_simple("stable-audio", root)
     if args.all or args.clap:
         failures += install_simple("clap", root)
+    if args.all or args.xclip:
+        failures += install_simple("xclip", root)
 
     print()
     show_list(root)

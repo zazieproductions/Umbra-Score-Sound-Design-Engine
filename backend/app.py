@@ -37,6 +37,7 @@ from backend.analysis.events import analyze_video_events
 from backend.analysis.scenes import detect_cuts, plan_project, plan_scene
 from backend.analysis.spotting import HORROR_PRESETS, build_prompt
 from backend.analysis.video import probe_video, toolchain_status
+from backend.analysis.xclip import get_xclip_analyzer
 from backend.analysis.waveform import analyze_features, generate_peaks
 from backend.providers.base import GenerationRequest, ProviderError
 from backend.providers.registry import get_registry, route_intent
@@ -125,6 +126,7 @@ async def models() -> Dict[str, Any]:
         "runtime": runtime_summary(),
         "providers": [s.to_json() for s in app.state.registry.statuses()],
         **model_manager.model_report().to_json(),
+        "xclip": get_xclip_analyzer().status_json(),
     }
 
 
@@ -363,6 +365,57 @@ async def analysis_events(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]
         title=payload.get("title") or "",
         tags=payload.get("tags") or [],
         summary=payload.get("summary") or "",
+    )
+    if payload.get("includeSemantics"):
+        sem = await get_xclip_analyzer().enrich_events(
+            Path(path),
+            result.get("events") or [],
+            window_seconds=float(payload.get("windowSeconds", 1.5)),
+            top_k=int(payload.get("topK", 5)),
+            frames=int(payload.get("frames", 8)),
+        )
+        result["events"] = sem["events"]
+        result["semantic"] = {
+            "available": sem["available"],
+            "modelId": sem.get("modelId"),
+            "device": sem.get("device"),
+            "message": sem.get("message"),
+            "stats": sem.get("stats"),
+            "installHint": sem.get("installHint"),
+        }
+        if not sem["available"] and sem.get("message"):
+            result["message"] = f"{result['message']} · X-CLIP: {sem['message']}"
+    return result
+
+
+@app.get("/api/analysis/xclip/status")
+async def analysis_xclip_status() -> Dict[str, Any]:
+    """Honest status for the optional X-CLIP semantic analysis layer.
+
+    ``runtimeVerified`` is only True after real X-CLIP inference processed
+    video frames this process — weights on disk alone never sets it.
+    """
+    return {"xclip": get_xclip_analyzer().status_json()}
+
+
+@app.post("/api/analysis/xclip")
+async def analysis_xclip(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Attach X-CLIP semantic candidates to meaningful event windows.
+
+    Input events are the pixel-derived ``SoundEventCandidate`` list produced
+    by ``/api/analysis/events`` (or the browser analyzer): X-CLIP answers WHAT
+    the window most likely represents, it never replaces the WHEN detector.
+    """
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    events = payload.get("events") or []
+    result = await get_xclip_analyzer().enrich_events(
+        Path(path),
+        events,
+        window_seconds=float(payload.get("windowSeconds", 1.5)),
+        top_k=int(payload.get("topK", 5)),
+        frames=int(payload.get("frames", 8)),
     )
     return result
 

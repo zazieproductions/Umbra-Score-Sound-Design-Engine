@@ -178,6 +178,43 @@ export type SoundEventKind =
 
 export type SoundDistance = 'close' | 'medium' | 'far';
 
+/* ----------------------------------------------------- X-CLIP semantics -- */
+
+/**
+ * One X-CLIP candidate against Umbra's bounded sound-design vocabulary.
+ * `label` is the model's probabilistic interpretation — it is never a
+ * guaranteed object/action recognition result.
+ */
+export interface SemanticLabelCandidate {
+  label: string;
+  /** Umbra vocabulary id, or null when X-CLIP produced an unmapped label */
+  labelId: string | null;
+  role: SoundRole;
+  eventKind: SoundEventKind;
+  /** Optional AudioSet-style label used for transparent expansion/mapping */
+  audioSet: string | null;
+  /** the audible sound-design retrieval query for this candidate */
+  query: string;
+  /** raw cosine similarity, clamped 0..1 */
+  similarity: number;
+  /** softmax confidence among the bounded Umbra vocabulary (0..1) */
+  confidence: number;
+}
+
+/** Semantic result attached to one meaningful video event window. */
+export interface SemanticVideoResult {
+  available: boolean;
+  eventId: string;
+  method: 'xclip' | 'none';
+  message: string | null;
+  modelId?: string;
+  device?: string | null;
+  candidates: SemanticLabelCandidate[];
+  runtimeMs?: number | null;
+  cacheHit?: boolean;
+  installHint?: string | null;
+}
+
 /**
  * The clean intermediate representation between video analysis and sound
  * retrieval. Every field that is estimated from pixels vs. scene metadata is
@@ -213,6 +250,13 @@ export interface SoundEventCandidate {
    * even when the pixel confidence is high.
    */
   ambiguous?: boolean;
+  /**
+   * X-CLIP semantic interpretation (WHAT the window most likely represents),
+   * attached by the local backend. Always probabilistic, never a guarantee.
+   */
+  semantic?: SemanticVideoResult | null;
+  /** best retrieval query suggested by the semantic result */
+  semanticQuery?: string;
 }
 
 /** Result of running pixel-level vision analysis over a real video. */
@@ -315,6 +359,13 @@ export interface RetrievalIntent {
   familySteps?: number[];
   /** events below the AUTH configurable confidence are suggestions only */
   suggestOnly?: boolean;
+  /* ---- X-CLIP semantic provenance (advisory, never overriding the user) ---- */
+  /** top Umbra vocabulary labels that drove this intent's query */
+  semanticLabels?: string[];
+  /** AudioSet-style label when the vocabulary carries one */
+  audioSetEvent?: string;
+  /** semantic confidence of the top X-CLIP candidate */
+  semanticConfidence?: number;
 }
 
 /** Nondestructive source + transform. The original asset is always kept. */

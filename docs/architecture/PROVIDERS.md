@@ -19,6 +19,16 @@ where each one runs.
 Routing between them: `backend/providers/registry.py` (`route_intent`) and
 the `/api/route` endpoint — a transparent scorer that returns its reasoning.
 
+## Analysis layers (not providers)
+
+X-CLIP (`microsoft/xclip-base-patch32`) is an **optional analysis layer**, not
+an audio provider: it runs in `backend/analysis/xclip.py`, samples meaningful
+event windows from the pixel detector, and returns probabilistic *what is
+this* candidates that are attached to the existing `SoundEventCandidate`
+before retrieval. It never generates audio and never creates a second model
+manager — model status appears through the existing Models report and status
+ladder (see `docs/development/XCLIP.md`).
+
 ## Routing boundaries (what each provider is NOT for)
 
 - ACE-Step scores. It does not author Foley, footsteps, door sounds, or room
