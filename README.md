@@ -52,6 +52,7 @@ npm install
 npm run dev      # local dev server with HMR
 npm run build    # typecheck + production bundle
 npm run lint     # eslint
+npm test         # sound-library retrieval acceptance tests (mocked Freesound API)
 ```
 
 Load the demo reel or drop a video (MP4 / MOV / ProRes / WebM, up to 4K). Use the **Mix** panel to ride the master bus, solo/mute/audition layers, and bounce stems; **Export** renders the full score to WAV in-browser.

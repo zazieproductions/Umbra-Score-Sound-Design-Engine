@@ -1,15 +1,183 @@
 import { useState } from 'react';
-import { Activity, CheckCircle2, Cpu, Download, HardDriveDownload, Server, SlidersHorizontal, Sparkles, Terminal, Waves } from 'lucide-react';
+import { Activity, CheckCircle2, Cpu, Download, Ear, ExternalLink, HardDriveDownload, RefreshCw, Server, SlidersHorizontal, Sparkles, Terminal, Trash2, Waves } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import LayerPanel, { Slider } from './LayerPanel';
 import { LoudnessMeter } from './Meter';
-import { bytes, tc } from '../lib/format';
+import { bytes, db, tc } from '../lib/format';
+import { ROLE_LABELS } from '../lib/library/types';
 
 const EXPORTS: { label: string; format: string; res: string; scene?: boolean; max?: number }[] = [
   { label: 'Full score master', format: 'WAV 24-bit / 48 kHz', res: 'stereo' },
   { label: 'Scene bounce', format: 'WAV 24-bit / 48 kHz', res: 'active scene', scene: true },
   { label: 'Trailer cut (60 s)', format: 'WAV 24-bit / 48 kHz', res: 'stereo', max: 60 },
 ];
+
+/* -------------------------------------------- spotting events -------- */
+
+function SpottingRow({ studio }: { studio: Studio }) {
+  const scene = studio.activeScene;
+  const [role, setRole] = useState<'DOOR' | 'FOOTSTEP' | 'IMPACT' | 'KNOCK' | 'MECHANICAL'>('DOOR');
+  if (!scene) return null;
+  return (
+    <div className="mt-2 border-t border-white/[0.06] pt-2">
+      <div className="mb-1 flex items-center gap-1.5">
+        <span className="eyebrow text-[8px]">Spotting event @ playhead</span>
+        <span className="chip tnum ml-auto">{tc(studio.time, true)}</span>
+      </div>
+      <div className="flex gap-1.5">
+        <select
+          value={role}
+          onChange={(e) => setRole(e.target.value as typeof role)}
+          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/35 px-1.5 py-1 text-[10px] text-ash outline-none"
+        >
+          {(['DOOR', 'FOOTSTEP', 'IMPACT', 'KNOCK', 'MECHANICAL'] as const).map((r) => (
+            <option key={r} value={r} className="bg-void">
+              {r}
+            </option>
+          ))}
+        </select>
+        <button
+          className="btn px-2 py-1 text-[10px]"
+          onClick={() => {
+            studio.addSpottingEvent(scene.id, role, studio.time);
+            studio.log(`retrieval intent queued for ${role} @ ${tc(studio.time, true)} — run Auto Sound Design or search in Library`, 'info');
+          }}
+        >
+          Mark
+        </button>
+      </div>
+      <p className="mt-1 text-[8.5px] leading-relaxed text-dim/70">
+        Marking DOOR OPEN @ 00:18.4 makes every retrieval pass search for old-door hinge/handle sounds at exactly that frame.
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------- clip inspector ---------- */
+
+function ClipInspector({ studio }: { studio: Studio }) {
+  const [altBusy, setAltBusy] = useState(false);
+  const clip = studio.selectedClip;
+  if (!clip) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="rounded-lg border border-dashed border-white/10 p-4 text-center">
+          <Waves size={16} className="mx-auto mb-2 text-dim" />
+          <p className="text-[11px] text-dim">No retrieved clip selected.</p>
+          <p className="mt-1 text-[9.5px] leading-relaxed text-dim/70">
+            Click a clip on the timeline, or USE a candidate in the Library view. Everything here is editable: move, trim, fade,
+            gain, pan, process, replace, delete.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  const a = clip.asset;
+  const t = clip.transform;
+  const patch = (p: Partial<typeof clip>) => studio.patchClip(clip.id, p);
+  const patchT = (p: Partial<typeof t>) => patch({ transform: { ...t, ...p } });
+
+  const findAlt = async () => {
+    setAltBusy(true);
+    await studio.findAlternatives(clip.id);
+    setAltBusy(false);
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="tnum chip border-brine/40 text-brine">MATCH {Math.round(clip.match * 100)}%</span>
+          <span className="chip">{clip.source}</span>
+          <span className="ml-auto text-[9px] text-dim">{ROLE_LABELS[clip.role]}</span>
+        </div>
+        <p className="mb-0.5 truncate text-[12px] font-semibold text-bone">{clip.name}</p>
+        <p className="tnum text-[10px] text-dim">
+          {tc(clip.start, true)} → {tc(clip.end, true)} · {(clip.end - clip.start).toFixed(2)}s · {a.providerLabel}
+        </p>
+        <button className="btn mt-1.5 w-full px-2 py-1 text-[10.5px]" onClick={() => void studio.auditionClip(clip.id)}>
+          <Ear size={10} /> Audition
+        </button>
+      </div>
+
+      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+        <span className="eyebrow mb-2 block text-bone/80">Position &amp; fades</span>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          <Slider label="Start" value={clip.start} min={0} max={studio.project?.duration ?? 600} step={0.01} fmt={(v) => tc(v, true)} onChange={(v) => patch({ start: v, end: Math.max(v + 0.05, clip.end) })} />
+          <Slider label="Length" value={clip.end - clip.start} min={0.05} max={60} step={0.01} fmt={(v) => `${v.toFixed(2)}s`} onChange={(v) => patch({ end: clip.start + v })} />
+          <Slider label="Fade in" value={clip.fadeIn} min={0} max={3} step={0.01} fmt={(v) => `${(v * 1000).toFixed(0)}ms`} onChange={(v) => patch({ fadeIn: v })} />
+          <Slider label="Fade out" value={clip.fadeOut} min={0} max={3} step={0.01} fmt={(v) => `${(v * 1000).toFixed(0)}ms`} onChange={(v) => patch({ fadeOut: v })} />
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+        <span className="eyebrow mb-2 block text-bone/80">Mix</span>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          <Slider label="Gain" value={clip.gain} max={1.3} fmt={(v) => `${db(v)} dB`} onChange={(v) => patch({ gain: v })} />
+          <Slider label="Pan" value={clip.pan} min={-1} max={1} fmt={(v) => (Math.abs(v) < 0.03 ? 'C' : `${v < 0 ? 'L' : 'R'}${Math.round(Math.abs(v) * 100)}`)} onChange={(v) => patch({ pan: v })} />
+        </div>
+        <div className="mt-1.5 flex gap-1.5">
+          <button className={`btn flex-1 px-2 py-1 text-[10px] ${clip.muted ? 'border-blood/50 text-ember' : ''}`} onClick={() => patch({ muted: !clip.muted })}>
+            {clip.muted ? 'Unmute' : 'Mute'}
+          </button>
+          <button className={`btn flex-1 px-2 py-1 text-[10px] ${clip.solo ? 'border-orchid/50 text-orchid' : ''}`} onClick={() => patch({ solo: !clip.solo })}>
+            Solo
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+        <span className="eyebrow mb-2 flex items-center justify-between text-bone/80">
+          SOURCE + TRANSFORM
+          <span className="text-[8px] text-dim/70">nondestructive · original kept</span>
+        </span>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          <Slider label="Playback rate" value={t.playbackRate} min={0.2} max={2.5} step={0.01} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => patchT({ playbackRate: v })} />
+          <Slider label="Pitch" value={t.pitch} min={-24} max={24} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v} st`} onChange={(v) => patchT({ pitch: v })} />
+          <Slider label="Gain trim" value={t.gainDb} min={-24} max={6} step={0.5} fmt={(v) => `${v > 0 ? '+' : ''}${v} dB`} onChange={(v) => patchT({ gainDb: v })} />
+          <Slider label="Reverb send" value={t.reverb} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patchT({ reverb: v })} />
+          <Slider label="Low-pass" value={t.lowpassHz ?? 20000} min={200} max={20000} step={50} fmt={(v) => (v >= 19900 ? 'off' : `${v} Hz`)} onChange={(v) => patchT({ lowpassHz: v >= 19900 ? null : v })} />
+          <Slider label="Slow modulation" value={t.slowModulate} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => patchT({ slowModulate: v })} />
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          <button className={`chip ${t.reverse ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ reverse: !t.reverse })}>
+            reverse {t.reverse ? 'on' : 'off'}
+          </button>
+          <button className={`chip ${t.loop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ loop: !t.loop })}>
+            loop {t.loop ? 'on' : 'off'}
+          </button>
+          <button className={`chip ${t.crossfadeLoop ? 'border-orchid/50 text-orchid' : 'border-white/10 text-dim'}`} onClick={() => patchT({ crossfadeLoop: !t.crossfadeLoop })}>
+            crossfade loop {t.crossfadeLoop ? 'on' : 'off'}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
+        <span className="eyebrow mb-1.5 block text-bone/80">Provenance</span>
+        <p className="mb-1 text-[9.5px] leading-relaxed text-dim">
+          {a.providerLabel} · “{a.title}” by {a.creator} · id {a.soundId} · {a.license} · {a.quality}
+        </p>
+        <p className="mb-1.5 break-words text-[9px] leading-relaxed text-dim/80">credit: {a.creditLine}</p>
+        <a className="btn px-2 py-1 text-[9.5px]" href={a.sourceUrl} target="_blank" rel="noreferrer">
+          <ExternalLink size={9} /> Source page
+        </a>
+      </div>
+
+      <div className="flex gap-1.5">
+        <button className="btn flex-1 px-2 py-1.5 text-[10.5px]" onClick={() => void findAlt()} disabled={altBusy}>
+          {altBusy ? <RefreshCw size={10} className="animate-spin" /> : <RefreshCw size={10} />} Find alternative
+        </button>
+        <button className="btn px-2 py-1.5 text-ember/85 hover:text-ember" onClick={() => studio.removeClip(clip.id)}>
+          <Trash2 size={11} /> Delete
+        </button>
+      </div>
+      <p className="text-[8.5px] leading-relaxed text-dim/70">
+        FIND ALTERNATIVE reruns the same retrieval intent; choosing a new source keeps timeline location, gain, pan, processing and
+        fades. Replace swaps source audio + provenance only.
+      </p>
+    </div>
+  );
+}
 
 function Gauge({ label, value, unit = '%', color = '#ff3b5c' }: { label: string; value: number; unit?: string; color?: string }) {
   return (
@@ -62,11 +230,13 @@ export function MasterStrip({ studio }: { studio: Studio }) {
 }
 
 export default function RightPanel({ studio }: { studio: Studio }) {
-  const [tab, setTab] = useState<'mix' | 'cloud' | 'out'>('mix');
+  const [tab, setTab] = useState<'mix' | 'clip' | 'cloud' | 'out'>('mix');
   const { project, activeScene, gpuLoad, analyzing, analyzeProgress, logs, jobs } = studio;
+  void studio.selectedClip; // Tab availability is fixed; ClipInspector reads it directly
 
   const TABS = [
     { id: 'mix' as const, label: 'Mix', icon: SlidersHorizontal },
+    { id: 'clip' as const, label: 'Clip', icon: Waves },
     { id: 'cloud' as const, label: 'Cloud', icon: Server },
     { id: 'out' as const, label: 'Export', icon: Download },
   ];
@@ -110,11 +280,14 @@ export default function RightPanel({ studio }: { studio: Studio }) {
                 <Gauge label="Motion energy" value={activeScene.motion * 100} color="#7d6bff" />
                 <Gauge label="Sync hits" value={Math.min(100, activeScene.hits.length * 20)} color="#a86bd6" />
               </div>
+              <SpottingRow studio={studio} />
             </div>
 
             <LayerPanel studio={studio} />
           </div>
         )}
+
+        {tab === 'clip' && <ClipInspector studio={studio} />}
 
         {tab === 'cloud' && (
           <div className="flex flex-col gap-3.5">

@@ -151,6 +151,8 @@ export function analyzeProject(name: string, duration: number, videoUrl: string 
     resolution: '3840 × 2160',
     videoUrl,
     scenes,
+    clips: [],
+    spotting: [],
     createdAt: Date.now(),
   };
 }
