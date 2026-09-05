@@ -1,20 +1,14 @@
 import { useMemo, useState } from 'react';
 import {
-  Activity,
   AudioLines,
   CheckCircle2,
   CircleDashed,
-  Cpu,
   Download,
   Ear,
   Gauge,
-  Globe2,
-  HardDrive,
   Layers,
   Loader,
   Search,
-  Server,
-  Shield,
   Sparkles,
   Trash2,
   Wand2,
@@ -25,7 +19,7 @@ import { KIND_META, KIND_ORDER, SPACES, type LayerKind, type SceneStatus } from 
 import { DEMO_ASSETS, addLayer } from '../lib/generate';
 import { bytes, tc } from '../lib/format';
 import { MasterStrip } from './RightPanel';
-import { Slider } from './LayerPanel';
+
 
 /* ------------------------------------------------------------------ shell */
 
@@ -470,120 +464,15 @@ export function ExportsView({ studio }: { studio: Studio }) {
   );
 }
 
-/* ------------------------------------------------------------------ cloud */
-
-export function CloudView({ studio }: { studio: Studio }) {
-  const regions = [
-    { r: 'eu-north-1b', gpu: 'A100 80GB ×4', load: studio.gpuLoad, ping: 14, active: true },
-    { r: 'us-east-2a', gpu: 'H100 ×2', load: 61, ping: 92, active: false },
-    { r: 'ap-southeast-1', gpu: 'L40S ×8', load: 24, ping: 218, active: false },
-  ];
-  return (
-    <ViewShell>
-      <div className="grid gap-3 lg:grid-cols-3">
-        {[
-          { I: Cpu, k: 'Diffusion throughput', v: `${(1.6 + studio.gpuLoad / 90).toFixed(2)}×`, d: 'realtime vs. cut length' },
-          { I: Activity, k: 'Queue depth', v: studio.analyzing ? 'active' : 'idle', d: `${studio.layerCount} layers resident` },
-          { I: HardDrive, k: 'Bucket usage', v: '38.4 GB', d: 'of 250 GB studio plan' },
-        ].map((c, i) => (
-          <div key={c.k} className="rise glass rounded-xl p-3.5" style={{ animationDelay: `${i * 70}ms` }}>
-            <c.I size={15} className="mb-2 text-ember" />
-            <p className="eyebrow">{c.k}</p>
-            <p className="font-display text-[22px] font-semibold text-bone">{c.v}</p>
-            <p className="text-[10.5px] text-dim">{c.d}</p>
-          </div>
-        ))}
-      </div>
-
-      <Panel title="Cloud processing status" sub="regional shards available to your workspace">
-        <div className="flex flex-col gap-2">
-          {regions.map((r) => (
-            <div key={r.r} className="flex flex-wrap items-center gap-3 rounded-lg border border-white/[0.06] bg-black/25 px-3 py-2.5">
-              <Globe2 size={14} className={r.active ? 'text-ember' : 'text-dim'} />
-              <span className="tnum w-[118px] text-[11.5px] text-bone">{r.r}</span>
-              <span className="text-[10.5px] text-ash">{r.gpu}</span>
-              <span className="ml-auto flex items-center gap-2">
-                <span className="h-[3px] w-[130px] overflow-hidden rounded-full bg-white/[0.08]">
-                  <span className="block h-full rounded-full transition-[width] duration-700" style={{ width: `${r.load}%`, background: r.active ? '#ff3b5c' : '#5c566e' }} />
-                </span>
-                <span className="tnum w-8 text-right text-[10px] text-ash">{r.load.toFixed(0)}%</span>
-                <span className="tnum w-14 text-right text-[10px] text-dim">{r.ping} ms</span>
-                <span className={`chip ${r.active ? 'border-ember/40 text-ember' : ''}`}>{r.active ? 'attached' : 'standby'}</span>
-              </span>
-            </div>
-          ))}
-        </div>
-      </Panel>
-
-      <Panel title="Activity stream" sub="signed, immutable job log">
-        <div className="max-h-[300px] overflow-y-auto">
-          {studio.logs.length === 0 && <p className="py-6 text-center text-[11.5px] text-dim">No events yet.</p>}
-          {studio.logs.map((l) => (
-            <div key={l.id} className="flex gap-3 border-b border-white/[0.04] py-1.5 last:border-0">
-              <span className="tnum shrink-0 text-[9.5px] text-dim">{new Date(l.at).toLocaleTimeString([], { hour12: false })}</span>
-              <span
-                className="tnum w-9 shrink-0 text-[9.5px] uppercase"
-                style={{ color: l.level === 'ok' ? '#4b8f9a' : l.level === 'warn' ? '#b9a37e' : l.level === 'gpu' ? '#a86bd6' : '#5c566e' }}
-              >
-                {l.level}
-              </span>
-              <span className="min-w-0 flex-1 break-words text-[11px] text-ash">{l.text}</span>
-            </div>
-          ))}
-        </div>
-      </Panel>
-    </ViewShell>
-  );
-}
-
 /* --------------------------------------------------------------- settings */
 
 export function SettingsView({ studio }: { studio: Studio }) {
-  const [model, setModel] = useState('CINEWORKS-v5');
-  const [steps, setSteps] = useState(32);
-  const [sr, setSr] = useState('48 kHz');
-  const [guidance, setGuidance] = useState(7.5);
-  const [safety, setSafety] = useState(true);
-
   return (
     <ViewShell>
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="flex flex-col gap-3">
-          <Panel title="Synthesis engine" sub="applies to all future generation passes">
-            <div className="flex flex-col gap-3.5">
-              <div>
-                <span className="eyebrow mb-1.5 block">Base model</span>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {['CINEWORKS-v5', 'HOLOGRAD-2', 'TITANSCORE-3', 'CHORALIS-2'].map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => {
-                        setModel(m);
-                        studio.log(`engine: base model → ${m}`, 'gpu');
-                      }}
-                      className={`btn justify-start text-[11px] ${model === m ? 'border-ember/45 bg-blood/15' : ''}`}
-                    >
-                      <Sparkles size={11} className={model === m ? 'text-ember' : 'text-dim'} /> {m}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <Slider label="Diffusion steps" value={steps} min={8} max={64} step={1} fmt={(v) => String(v)} onChange={setSteps} />
-              <Slider label="Guidance scale" value={guidance} min={1} max={16} step={0.1} fmt={(v) => v.toFixed(1)} onChange={setGuidance} />
-              <div>
-                <span className="eyebrow mb-1.5 block">Sample rate</span>
-                <div className="flex gap-1.5">
-                  {['44.1 kHz', '48 kHz', '96 kHz'].map((s) => (
-                    <button key={s} onClick={() => setSr(s)} className={`btn flex-1 text-[11px] ${sr === s ? 'border-ember/45 bg-blood/15' : ''}`}>
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <button className="btn" onClick={() => setSafety((s) => !s)}>
-                <Shield size={12} className={safety ? 'text-brine' : 'text-dim'} /> True-peak limiter {safety ? 'on' : 'off'}
-              </button>
-            </div>
+          <Panel title="Master chain" sub="live processing on the monitor and on every bounce">
+            <MasterStrip studio={studio} />
           </Panel>
 
           <Panel title="Convolution spaces" sub="procedural impulse responses used by the send buses">
@@ -602,28 +491,45 @@ export function SettingsView({ studio }: { studio: Studio }) {
         </div>
 
         <div className="flex flex-col gap-3">
-          <Panel title="Master chain" sub="live processing on the monitor and every bounce">
-            <MasterStrip studio={studio} />
-          </Panel>
-
-          <Panel title="Workspace" sub="studio plan · 4 seats">
+          <Panel title="Delivery" sub="fixed targets for every offline bounce">
             <div className="flex flex-col gap-2">
               {[
-                ['Plan', 'Studio · $89/mo'],
-                ['Render credits', '842 remaining'],
-                ['Concurrency', '3 parallel jobs'],
-                ['Retention', '30 days'],
+                ['Sample rate', '48 kHz'],
+                ['Bit depth', '24-bit PCM · TPDF dither'],
+                ['Integrated loudness', '-16 LUFS (BS.1770)'],
+                ['True-peak ceiling', '-1.0 dBTP'],
+                ['Render path', 'OfflineAudioContext · same graph as the monitor'],
               ].map(([k, v]) => (
-                <div key={k} className="flex items-center justify-between border-b border-white/[0.05] pb-1.5 last:border-0">
-                  <span className="text-[11px] text-dim">{k}</span>
-                  <span className="tnum text-[11px] text-bone">{v}</span>
+                <div key={k} className="flex items-center justify-between gap-3 border-b border-white/[0.05] pb-1.5 last:border-0">
+                  <span className="shrink-0 text-[11px] text-dim">{k}</span>
+                  <span className="tnum text-right text-[11px] text-bone">{v}</span>
                 </div>
               ))}
-              <button className="btn mt-1" onClick={() => studio.log('workspace: cache purged (1.2 GB reclaimed)', 'warn')}>
-                <Server size={12} /> Purge local cache
-              </button>
+            </div>
+          </Panel>
+
+          <Panel title="Trained models" sub="inference runs locally — nothing is uploaded">
+            <p className="mb-2.5 text-[11px] leading-relaxed text-ash">
+              ACE-Step, Stable Audio Open, MMAudio and CLAP run in a local Python service on your own machine.
+              Reference audio and any personalization material you point Umbra at never leave this computer.
+            </p>
+            <p className="text-[10px] leading-relaxed text-dim">
+              Open the Models view for install state, detected devices and setup commands.
+            </p>
+          </Panel>
+
+          <Panel title="Workspace" sub="local project state">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between border-b border-white/[0.05] pb-1.5">
+                <span className="text-[11px] text-dim">Generated clips</span>
+                <span className="tnum text-[11px] text-bone">{studio.clips.length}</span>
+              </div>
+              <div className="flex items-center justify-between border-b border-white/[0.05] pb-1.5">
+                <span className="text-[11px] text-dim">Layers resident</span>
+                <span className="tnum text-[11px] text-bone">{studio.layerCount}</span>
+              </div>
               {studio.project && (
-                <button className="btn text-ember/85 hover:text-ember" onClick={studio.reset}>
+                <button className="btn mt-1 text-ember/85 hover:text-ember" onClick={studio.reset}>
                   <Trash2 size={12} /> Close project
                 </button>
               )}

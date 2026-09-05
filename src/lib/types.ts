@@ -57,6 +57,90 @@ export interface Scene {
   layers: Layer[];
 }
 
+/* ==================================================================== *
+ *  AUDIO CLIPS
+ *  Every provider — ACE-Step, Stable Audio, MMAudio, the user's own
+ *  library — ultimately lands on the timeline as an AudioClip. Clips are
+ *  ordinary editable timeline objects: move, trim, split, fade, mute,
+ *  solo, gain, pan, delete, regenerate, download, export. There is no
+ *  separate "AI result" player.
+ * ==================================================================== */
+
+export type ClipProvider =
+  | 'umbra-procedural'
+  | 'ace-step'
+  | 'stable-audio'
+  | 'mmaudio'
+  | 'library'
+  | 'user';
+
+export interface ClipMetadata {
+  provider: ClipProvider;
+  model?: string | null;
+  prompt?: string;
+  negativePrompt?: string | null;
+  seed?: number | string | null;
+  bpm?: number | null;
+  key?: string | null;
+  mode?: string | null;
+  keyScale?: string | null;
+  timeSignature?: string | null;
+  /** ACE-Step task this clip came from (text2music / complete / repaint …) */
+  aceTaskType?: string;
+  task?: string;
+  referenceAudioId?: string | null;
+  sourceAudioId?: string | null;
+  /** full conditioning package actually sent to the model */
+  generationSettings?: Record<string, unknown>;
+  inferenceSeconds?: number;
+  [key: string]: unknown;
+}
+
+export interface AudioClip {
+  id: string;
+  name: string;
+  /** backend audio id — the real file behind this clip */
+  audioId: string;
+  /** URL the browser fetches and decodes */
+  url: string;
+  provider: ClipProvider;
+
+  /* placement on the project timeline (seconds) */
+  start: number;
+  /** visible length; may be shorter than the source after trimming */
+  duration: number;
+  /** trim offset into the source buffer */
+  offset: number;
+  /** full decoded source length — the trim ceiling */
+  sourceDuration: number;
+
+  /* mix */
+  gain: number;   // 0 .. 1.5
+  pan: number;    // -1 .. 1
+  fadeIn: number; // seconds
+  fadeOut: number;
+  muted: boolean;
+  solo: boolean;
+
+  /* real measured properties of the decoded file */
+  sampleRate: number;
+  channels: number;
+
+  metadata: ClipMetadata;
+  createdAt: number;
+  /** bumped on every regenerate so the UI can show variant history */
+  version: number;
+}
+
+export const CLIP_PROVIDER_META: Record<ClipProvider, { label: string; color: string; short: string }> = {
+  'umbra-procedural': { label: 'Umbra Procedural', color: '#ff3b5c', short: 'PROC' },
+  'ace-step': { label: 'ACE-Step', color: '#7fb6e0', short: 'ACE' },
+  'stable-audio': { label: 'Stable Audio', color: '#4b8f9a', short: 'SAO' },
+  mmaudio: { label: 'MMAudio', color: '#b9a37e', short: 'MMA' },
+  library: { label: 'Library', color: '#a86bd6', short: 'LIB' },
+  user: { label: 'User audio', color: '#c0a3e6', short: 'USR' },
+};
+
 export interface Project {
   id: string;
   name: string;
@@ -66,6 +150,8 @@ export interface Project {
   resolution: string;
   videoUrl: string | null;
   scenes: Scene[];
+  /** provider-generated clips living on the shared timeline */
+  clips: AudioClip[];
   createdAt: number;
 }
 

@@ -1,6 +1,6 @@
-import { Aperture, Boxes, CloudCog, Download, Layers, Radio, Settings, Waves } from 'lucide-react';
+import { Aperture, Boxes, Cpu, Download, Layers, Radio, Settings, Waves } from 'lucide-react';
 
-export type ViewId = 'studio' | 'scenes' | 'pipeline' | 'assets' | 'exports' | 'cloud' | 'settings';
+export type ViewId = 'studio' | 'scenes' | 'pipeline' | 'assets' | 'exports' | 'models' | 'settings';
 
 const ITEMS: { id: ViewId; label: string; icon: typeof Waves }[] = [
   { id: 'studio', label: 'Studio', icon: Waves },
@@ -8,7 +8,7 @@ const ITEMS: { id: ViewId; label: string; icon: typeof Waves }[] = [
   { id: 'pipeline', label: 'Pipeline', icon: Layers },
   { id: 'assets', label: 'Assets', icon: Boxes },
   { id: 'exports', label: 'Exports', icon: Download },
-  { id: 'cloud', label: 'Cloud', icon: CloudCog },
+  { id: 'models', label: 'Models', icon: Cpu },
   { id: 'settings', label: 'Engine', icon: Settings },
 ];
 

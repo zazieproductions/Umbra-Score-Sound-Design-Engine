@@ -1,7 +1,9 @@
 import { useState } from 'react';
-import { Activity, CheckCircle2, Cpu, Download, HardDriveDownload, Server, SlidersHorizontal, Sparkles, Terminal, Waves } from 'lucide-react';
+import { Activity, CheckCircle2, Download, HardDriveDownload, SlidersHorizontal, Sparkles, Terminal, Waves, Wand2 } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import LayerPanel, { Slider } from './LayerPanel';
+import ScoringPanel from './ScoringPanel';
+import ClipInspector from './ClipInspector';
 import { LoudnessMeter } from './Meter';
 import { bytes, tc } from '../lib/format';
 
@@ -62,12 +64,12 @@ export function MasterStrip({ studio }: { studio: Studio }) {
 }
 
 export default function RightPanel({ studio }: { studio: Studio }) {
-  const [tab, setTab] = useState<'mix' | 'cloud' | 'out'>('mix');
-  const { project, activeScene, gpuLoad, analyzing, analyzeProgress, logs, jobs } = studio;
+  const [tab, setTab] = useState<'mix' | 'score' | 'out'>('score');
+  const { project, activeScene, logs, jobs } = studio;
 
   const TABS = [
+    { id: 'score' as const, label: 'Score', icon: Wand2 },
     { id: 'mix' as const, label: 'Mix', icon: SlidersHorizontal },
-    { id: 'cloud' as const, label: 'Cloud', icon: Server },
     { id: 'out' as const, label: 'Export', icon: Download },
   ];
 
@@ -116,49 +118,36 @@ export default function RightPanel({ studio }: { studio: Studio }) {
           </div>
         )}
 
-        {tab === 'cloud' && (
+        {tab === 'score' && (
           <div className="flex flex-col gap-3.5">
-            <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
-              <div className="mb-2.5 flex items-center gap-2">
-                <Cpu size={13} className="text-ember" />
-                <span className="eyebrow text-bone/80">Compute shard</span>
-                <span className="chip ml-auto border-ember/30 text-ember">
-                  <span className="h-1.5 w-1.5 rounded-full bg-ember livedot" /> live
-                </span>
-              </div>
-              <div className="flex flex-col gap-2">
-                <Gauge label="GPU A100 · eu-north-1b" value={gpuLoad} />
-                <Gauge label="VRAM 80 GB" value={34 + gpuLoad * 0.4} color="#7d6bff" />
-                <Gauge label="Diffusion queue" value={analyzing ? analyzeProgress : 100} color="#4b8f9a" />
-              </div>
-              <div className="mt-2.5 grid grid-cols-3 gap-2 border-t border-white/[0.06] pt-2.5">
-                {[
-                  ['Scenes', project ? `${studio.readyCount}/${project.scenes.length}` : '—'],
-                  ['Layers', String(studio.layerCount)],
-                  ['Credits', '842'],
-                ].map(([k, v]) => (
-                  <div key={k}>
-                    <p className="eyebrow text-[8px]">{k}</p>
-                    <p className="tnum text-[13px] font-semibold text-bone">{v}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <ScoringPanel studio={studio} />
+            <ClipInspector studio={studio} />
 
             <div className="rounded-lg border border-white/[0.07] bg-black/25">
               <div className="flex items-center gap-2 border-b border-white/[0.06] px-2.5 py-2">
                 <Terminal size={12} className="text-orchid" />
-                <span className="eyebrow text-bone/80">Processing log</span>
+                <span className="eyebrow text-bone/80">Activity log</span>
                 <span className="chip tnum ml-auto">{logs.length}</span>
               </div>
-              <div className="max-h-[320px] overflow-y-auto p-2">
+              <div className="max-h-[260px] overflow-y-auto p-2">
                 {logs.length === 0 && <p className="p-3 text-center text-[11px] text-dim">No activity yet.</p>}
                 {logs.map((l) => (
                   <div key={l.id} className="flex gap-2 border-b border-white/[0.03] py-1.5 last:border-0">
-                    <span className="tnum shrink-0 text-[9px] text-dim">{new Date(l.at).toLocaleTimeString([], { hour12: false })}</span>
+                    <span className="tnum shrink-0 text-[9px] text-dim">
+                      {new Date(l.at).toLocaleTimeString([], { hour12: false })}
+                    </span>
                     <span
                       className="tnum shrink-0 text-[9px] uppercase"
-                      style={{ color: l.level === 'ok' ? '#4b8f9a' : l.level === 'warn' ? '#b9a37e' : l.level === 'gpu' ? '#a86bd6' : '#5c566e' }}
+                      style={{
+                        color:
+                          l.level === 'ok'
+                            ? '#4b8f9a'
+                            : l.level === 'warn'
+                              ? '#b9a37e'
+                              : l.level === 'gpu'
+                                ? '#a86bd6'
+                                : '#5c566e',
+                      }}
                     >
                       {l.level}
                     </span>

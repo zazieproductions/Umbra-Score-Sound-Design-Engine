@@ -5,7 +5,8 @@ import Uploader from './components/Uploader';
 import Viewer from './components/Viewer';
 import Timeline from './components/Timeline';
 import RightPanel from './components/RightPanel';
-import { AssetsView, CloudView, ExportsView, PipelineView, ScenesView, SettingsView } from './components/Views';
+import { AssetsView, ExportsView, PipelineView, ScenesView, SettingsView } from './components/Views';
+import ModelsView from './components/ModelsView';
 import { useStudio } from './lib/useStudio';
 import { tc } from './lib/format';
 
@@ -116,8 +117,8 @@ export default function App() {
               <AssetsView studio={studio} />
             ) : view === 'exports' ? (
               <ExportsView studio={studio} />
-            ) : view === 'cloud' ? (
-              <CloudView studio={studio} />
+            ) : view === 'models' ? (
+              <ModelsView studio={studio} />
             ) : (
               <SettingsView studio={studio} />
             )}
@@ -135,8 +136,22 @@ export default function App() {
           <span className="eyebrow text-[8px]">48 kHz / 24-bit</span>
           <span className="eyebrow hidden text-[8px] sm:block">-16 LUFS · -1 dBTP</span>
           {project && <span className="eyebrow tnum hidden text-[8px] md:block">{tc(studio.time, true, project.fps)} / {tc(project.duration, true, project.fps)}</span>}
-          <span className="eyebrow ml-auto text-[8px]">gpu {studio.gpuLoad.toFixed(0)}%</span>
-          <span className="eyebrow hidden text-[8px] sm:block">eu-north-1b</span>
+          <span className="eyebrow ml-auto flex items-center gap-1.5 text-[8px]">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                studio.generation.backendState === 'online'
+                  ? 'bg-brine'
+                  : studio.generation.backendState === 'checking'
+                    ? 'bg-tan'
+                    : 'bg-dim'
+              }`}
+            />
+            backend {studio.generation.backendState}
+          </span>
+          {studio.generation.activeJobs.length > 0 && (
+            <span className="eyebrow tnum text-[8px] text-ember">{studio.generation.activeJobs.length} generating</span>
+          )}
+          <span className="eyebrow hidden text-[8px] sm:block">{studio.clips.length} clips</span>
         </footer>
       </div>
     </div>

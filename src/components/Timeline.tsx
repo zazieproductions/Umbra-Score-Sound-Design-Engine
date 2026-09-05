@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Magnet, Minus, Plus, Scissors, ZoomIn } from 'lucide-react';
+import { Magnet, Minus, Plus, Scissors, SquareDashed, ZoomIn } from 'lucide-react';
 import type { Studio } from '../lib/useStudio';
 import { KIND_META } from '../lib/types';
 import { waveform } from '../lib/generate';
 import { tc } from '../lib/format';
 import type { LayerKind } from '../lib/types';
+import ClipLane, { ClipLaneHeaders } from './ClipLane';
 
 function WaveRow({
   seed,
@@ -52,6 +53,10 @@ export default function Timeline({ studio }: { studio: Studio }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [snap, setSnap] = useState(true);
   const [drag, setDrag] = useState(false);
+  const [marking, setMarking] = useState<number | null>(null);
+  const [laneWidth, setLaneWidth] = useState(1);
+
+  const { range, setRange, clips, selectedClip } = studio;
 
   const duration = project?.duration ?? 1;
 
@@ -86,8 +91,41 @@ export default function Timeline({ studio }: { studio: Studio }) {
     };
   }, [drag, posFromEvent, seek]);
 
+  // Measure the drawn lane width so clip drags map pixels → seconds exactly.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const measure = () => {
+      const inner = el.firstElementChild as HTMLElement | null;
+      setLaneWidth(inner?.scrollWidth || el.scrollWidth || 1);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [zoom, project?.id]);
+
+  useEffect(() => {
+    if (marking === null) return;
+    const move = (e: MouseEvent) => {
+      const t = posFromEvent(e.clientX);
+      setRange({ start: Math.min(marking, t), end: Math.max(marking, t) });
+    };
+    const up = () => {
+      setRange((r) => (r && r.end - r.start < 0.25 ? null : r));
+      setMarking(null);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+  }, [marking, posFromEvent, setRange]);
+
   if (!project) return null;
   const playheadPct = (time / duration) * 100;
+  const pxPerSecond = laneWidth / Math.max(0.001, duration);
   const ticks = Array.from({ length: Math.floor(duration / 10) + 1 }, (_, i) => i * 10);
 
   return (
@@ -96,13 +134,27 @@ export default function Timeline({ studio }: { studio: Studio }) {
         <span className="eyebrow text-bone/80">Timeline</span>
         <span className="chip">{project.scenes.length} scenes</span>
         <span className="chip">{project.fps} fps</span>
+        {clips.length > 0 && <span className="chip">{clips.length} clips</span>}
         {activeScene && <span className="chip hidden sm:inline-flex">{activeScene.layers[0]?.space ?? 'hall'} space</span>}
         <div className="ml-auto flex items-center gap-1.5">
           <button className={`btn px-2 py-1.5 ${snap ? 'text-ember' : ''}`} onClick={() => setSnap((s) => !s)} title="Snap to cuts & hits">
             <Magnet size={12} />
             <span className="hidden sm:inline">Snap</span>
           </button>
-          <button className="btn px-2 py-1.5" onClick={() => studio.log(`split marker placed @ ${tc(time, true)}`, 'info')} title="Split at playhead">
+          <button
+            className={`btn px-2 py-1.5 ${range ? 'text-ember' : ''}`}
+            onClick={() => setRange(range ? null : { start: time, end: Math.min(duration, time + 12) })}
+            title="Set an in/out range for generation (or shift-drag the ruler)"
+          >
+            <SquareDashed size={12} />
+            <span className="hidden sm:inline">{range ? `${tc(range.start)}–${tc(range.end)}` : 'Range'}</span>
+          </button>
+          <button
+            className="btn px-2 py-1.5"
+            disabled={!selectedClip}
+            onClick={() => selectedClip && studio.splitClip(selectedClip.id, time)}
+            title="Split the selected clip at the playhead"
+          >
             <Scissors size={12} />
           </button>
           <div className="flex items-center gap-1 rounded-lg border border-white/[0.09] bg-white/[0.03] px-1.5 py-1">
@@ -133,6 +185,7 @@ export default function Timeline({ studio }: { studio: Studio }) {
               <span className="truncate text-[10px] text-ash">{l.name}</span>
             </div>
           ))}
+          <ClipLaneHeaders studio={studio} />
         </div>
 
         <div className="relative min-w-0 flex-1 overflow-x-auto overflow-y-auto" ref={trackRef}>
@@ -140,8 +193,14 @@ export default function Timeline({ studio }: { studio: Studio }) {
             <div
               className="relative h-6 cursor-pointer border-b border-white/[0.06] bg-black/20"
               onMouseDown={(e) => {
+                const t = posFromEvent(e.clientX);
+                if (e.shiftKey) {
+                  setMarking(t);
+                  setRange({ start: t, end: t });
+                  return;
+                }
                 setDrag(true);
-                seek(posFromEvent(e.clientX));
+                seek(t);
               }}
             >
               {ticks.map((t) => (
@@ -213,6 +272,19 @@ export default function Timeline({ studio }: { studio: Studio }) {
                 </div>
               );
             })}
+
+            <ClipLane studio={studio} duration={duration} pxPerSecond={pxPerSecond} />
+
+            {range && (
+              <div
+                className="pointer-events-none absolute top-0 z-[9] h-full border-x border-ember/60 bg-ember/[0.09]"
+                style={{ left: `${(range.start / duration) * 100}%`, width: `${((range.end - range.start) / duration) * 100}%` }}
+              >
+                <span className="tnum absolute -top-0 left-1 text-[8.5px] text-ember">
+                  {(range.end - range.start).toFixed(1)}s
+                </span>
+              </div>
+            )}
 
             <div className="pointer-events-none absolute top-0 z-10 h-full" style={{ left: `${playheadPct}%` }}>
               <div className={`h-full w-[1.5px] bg-ember ${playing && audioOn ? 'shadow-[0_0_14px_3px_rgba(255,59,92,0.55)]' : 'shadow-[0_0_8px_1px_rgba(255,59,92,0.4)]'}`} />
