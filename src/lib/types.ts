@@ -57,7 +57,27 @@ export interface Scene {
   summary: string;
   status: SceneStatus;
   hits: number[];
+  /**
+   * Audible procedural voices for this scene. Empty by default — analysis
+   * (ingest/import) only produces the structural plan below; procedural
+   * synthesis is one optional source among several (library retrieval,
+   * generated clips, user imports) and is only populated by an explicit
+   * Generate / Regen / Auto Sound Design action, never automatically on
+   * import. See `plan` for the deterministic suggestion analysis derived.
+   */
   layers: Layer[];
+  /**
+   * Deterministic structural suggestion for this scene — the archetype's
+   * candidate voice classes, reverb space and tonal root. Metadata only:
+   * it never produces sound by itself. `generateSceneLayers()` turns it
+   * into real Layer[] when the composer explicitly asks for a procedural
+   * score on this scene.
+   */
+  plan?: {
+    kinds: LayerKind[];
+    space: SpaceId;
+    root: number;
+  };
 }
 
 /* ==================================================================== *

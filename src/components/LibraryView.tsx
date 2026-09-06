@@ -543,9 +543,11 @@ function ProviderCards({ studio }: { studio: Studio }) {
               <span className="h-2 w-2 rounded-full" style={{ background: s.ready ? '#4b8f9a' : '#7a5b46', boxShadow: `0 0 6px ${s.ready ? '#4b8f9a88' : '#7a5b4688'}` }} />
               <span className="text-[11.5px] font-medium text-bone">{s.label}</span>
               {s.provider === 'freesound' && (
-                <span className="chip ml-auto border-white/10 text-[8.5px]">
-                  {studio.freesoundConnection.configured ? <Lock size={8} /> : <X size={8} />} key{' '}
-                  {studio.freesoundConnection.configured ? 'on server' : 'missing'}
+                <span
+                  className={`chip ml-auto text-[8.5px] ${s.ready ? 'border-brine/45 text-brine' : 'border-white/10 text-dim'}`}
+                  title={studio.freesoundConnection.reason ?? undefined}
+                >
+                  {s.ready ? <Lock size={8} /> : <X size={8} />} {s.ready ? 'Connected' : studio.freesoundConnection.configured ? 'Not connected' : 'Not configured'}
                 </span>
               )}
             </div>

@@ -4,7 +4,7 @@ import { tc } from '../lib/format';
 import { LoudnessMeter, Spectrum } from './Meter';
 
 export default function Viewer({ studio }: { studio: Studio }) {
-  const { project, activeScene, time, playing, setPlaying, seek, audioOn, toggleAudio, master, setMaster, videoRef } = studio;
+  const { project, activeScene, time, playing, togglePlay, seek, audioOn, toggleAudio, master, setMaster, videoRef } = studio;
   if (!project || !activeScene) return null;
 
   const scenes = project.scenes;
@@ -53,7 +53,7 @@ export default function Viewer({ studio }: { studio: Studio }) {
         <button className="btn px-2 py-1.5" onClick={() => go(-1)} title="Previous scene">
           <SkipBack size={13} />
         </button>
-        <button className="btn btn-primary h-8 w-11" onClick={() => setPlaying(!playing)}>
+        <button className="btn btn-primary h-8 w-11" onClick={togglePlay} title={playing ? 'Pause' : 'Play — starts the monitor automatically'}>
           {playing ? <Pause size={14} /> : <Play size={14} />}
         </button>
         <button className="btn px-2 py-1.5" onClick={() => go(1)} title="Next scene">

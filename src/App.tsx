@@ -23,7 +23,7 @@ export default function App() {
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (e.code === 'Space') {
         e.preventDefault();
-        studio.setPlaying(!studio.playing);
+        studio.togglePlay();
       }
       if (e.key === 'm') studio.toggleAudio();
       if (e.key === 'ArrowRight') studio.seek(Math.min(project.duration, studio.time + 2));

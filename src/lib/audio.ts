@@ -37,6 +37,16 @@ interface LiveClip {
 }
 
 /**
+ * A one-shot preview/audition source (library candidate preview, layer
+ * audition). Tracked here — not just self-timed — so `stop()` (Pause /
+ * Monitor Off) reaches it immediately instead of leaving a free-floating
+ * BufferSourceNode or voice ringing out on its own schedule.
+ */
+interface Preview {
+  stop(): void;
+}
+
+/**
  * Realtime monitoring engine. Keeps a pool of voices matching the active
  * scene, drives event scheduling with lookahead, and exposes metering.
  * Unified for procedural + generative + library clips.
@@ -48,6 +58,8 @@ export class ScoreEngine {
   private live = new Map<string, Live>();
   private liveClips = new Map<string, LiveClip>();
   private clipBuffers = new Map<string, AudioBuffer>();
+  private previews = new Map<number, Preview>();
+  private previewSeq = 0;
   private raf = 0;
   private running = false;
   private params: MasterParams = { ...DEFAULT_MASTER };
@@ -280,6 +292,22 @@ export class ScoreEngine {
     this.syncClips(clips, time);
   }
 
+  /**
+   * Force a clean reschedule of every timeline clip at a new transport
+   * position — used when the composer seeks (click/drag the playhead)
+   * while the monitor is running. Every in-flight clip source is stopped
+   * immediately (no release tail) before `syncClips` re-evaluates from the
+   * new position, so a seek can never leave a stale source stacked against
+   * a freshly scheduled one. Procedural layers are untouched: they are
+   * generative beds, not timeline-positioned material, so a seek does not
+   * need to (and must not) retrigger or duplicate them.
+   */
+  reseek(clips: AudioClip[], time: number) {
+    if (!this.running || !this.ctx) return;
+    this.stopClips();
+    this.syncClips(clips, time);
+  }
+
   private loop() {
     cancelAnimationFrame(this.raf);
     const tick = () => {
@@ -305,8 +333,26 @@ export class ScoreEngine {
     this.raf = requestAnimationFrame(tick);
   }
 
+  /**
+   * Stop every tracked preview/audition source immediately (hard stop, no
+   * release tail — the composer clicked Pause/Stop and expects silence
+   * *now*). Used by stop() and exposed so a fresh preview can cut off a
+   * still-sounding previous one.
+   */
+  private stopPreviews() {
+    for (const [, p] of this.previews) {
+      try {
+        p.stop();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.previews.clear();
+  }
+
   /** Listen to a buffer through the master graph — used for library previews */
   auditionBuffer(buffer: AudioBuffer, duration = 3) {
+    this.stopPreviews(); // one preview sounds at a time; never stack
     const ctx = this.ensure();
     void ctx.resume();
     const master = this.master!;
@@ -322,17 +368,41 @@ export class ScoreEngine {
     g.connect(master.musicSum);
     src.start(now);
     src.stop(now + Math.max(0.35, duration + 0.1));
+
+    const id = this.previewSeq++;
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      try {
+        g.gain.cancelScheduledValues(ctx.currentTime);
+        g.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
+        src.stop(ctx.currentTime + 0.05);
+      } catch {
+        /* already stopped */
+      }
+      try {
+        src.disconnect();
+        g.disconnect();
+      } catch {
+        /* already gone */
+      }
+      this.previews.delete(id);
+    };
+    this.previews.set(id, { stop });
+    src.onended = stop;
     if (!this.running) {
       this.running = true;
       this.loop();
       window.setTimeout(() => {
-        if (this.live.size === 0) this.running = false;
+        if (this.live.size === 0 && this.previews.size === 0) this.running = false;
       }, (duration + 1.5) * 1000);
     }
   }
 
   /** Short solo audition of one layer, independent of the transport. */
   audition(layer: Layer) {
+    this.stopPreviews(); // one preview sounds at a time; never stack
     const ctx = this.ensure();
     void ctx.resume();
     const master = this.master!;
@@ -355,25 +425,44 @@ export class ScoreEngine {
       }
     }
     voice.ch.fader.gain.setTargetAtTime(0, now + dur, 0.28);
-    window.setTimeout(() => {
+
+    const id = this.previewSeq++;
+    let stopped = false;
+    let timer = 0;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      window.clearTimeout(timer);
       try {
-        voice.stop(ctx.currentTime);
-        voice.dispose();
+        voice.ch.fader.gain.cancelScheduledValues(ctx.currentTime);
+        voice.ch.fader.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
+        voice.stop(ctx.currentTime + 0.05);
       } catch {
         /* noop */
       }
-    }, (dur + 1.6) * 1000);
+      window.setTimeout(() => {
+        try {
+          voice.dispose();
+        } catch {
+          /* noop */
+        }
+      }, 150);
+      this.previews.delete(id);
+    };
+    this.previews.set(id, { stop });
+    timer = window.setTimeout(stop, (dur + 1.6) * 1000);
     if (!this.running) {
       this.running = true;
       this.loop();
       window.setTimeout(() => {
-        if (this.live.size === 0) this.running = false;
+        if (this.live.size === 0 && this.previews.size === 0) this.running = false;
       }, (dur + 1.8) * 1000);
     }
   }
 
   stop() {
     this.stopClips();
+    this.stopPreviews();
     if (!this.ctx) {
       this.running = false;
       return;

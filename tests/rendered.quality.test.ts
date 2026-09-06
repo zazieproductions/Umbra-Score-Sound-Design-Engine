@@ -44,9 +44,17 @@ if (webAudio) {
 }
 
 import { DEFAULT_MASTER } from '../src/lib/dsp';
-import { addLayer, analyzeProject } from '../src/lib/generate';
+import { addLayer, analyzeProject, generateSceneLayers } from '../src/lib/generate';
 import { renderScore, renderStem } from '../src/lib/render';
 import { KIND_ORDER, type Layer, type Scene } from '../src/lib/types';
+
+/** analyzeProject() leaves scenes silent (req: no unsolicited procedural
+ *  fill on import) — these tests exercise the procedural engine itself, so
+ *  they explicitly opt every scene into a generated stack the same way the
+ *  Generate / Regen scene action would. */
+function populated(proj: ReturnType<typeof analyzeProject>): ReturnType<typeof analyzeProject> {
+  return { ...proj, scenes: proj.scenes.map((s) => ({ ...s, layers: generateSceneLayers(s) })) };
+}
 
 function denseScene(): Scene {
   const layers: Layer[] = KIND_ORDER.map((kind) => addLayer(kind, 'cathedral', 1, 40));
@@ -76,7 +84,7 @@ describe.skipIf(!HAS_WEB_AUDIO)('rendered audio quality', () => {
   it(
     'a dense 17-voice stack at full intensity stays clean (no clip / DC / NaN / subsonic blowup)',
     async () => {
-      const proj = analyzeProject('stress', 8, null, 'stress');
+      const proj = populated(analyzeProject('stress', 8, null, 'stress'));
       const scene = denseScene();
       const res = await renderScore(proj, DEFAULT_MASTER, { maxSeconds: 10 }, scene);
       const q = res.quality!;
@@ -91,7 +99,7 @@ describe.skipIf(!HAS_WEB_AUDIO)('rendered audio quality', () => {
   );
 
   it('a full project conforms to the -16 LUFS target with headroom to spare', async () => {
-    const proj = analyzeProject('conform', 24, null, 'conform');
+    const proj = populated(analyzeProject('conform', 24, null, 'conform'));
     const res = await renderScore(proj, DEFAULT_MASTER, { maxSeconds: 30 });
     expect(res.quality!.lufs).toBeGreaterThan(-17.5);
     expect(res.quality!.lufs).toBeLessThan(-14.5);
@@ -99,7 +107,7 @@ describe.skipIf(!HAS_WEB_AUDIO)('rendered audio quality', () => {
   }, 120_000);
 
   it('near-silent material is preserved, not pumped to broadcast level', async () => {
-    const proj = analyzeProject('silence', 8, null, 'silence');
+    const proj = populated(analyzeProject('silence', 8, null, 'silence'));
     const scene = proj.scenes[0];
     const muted: Scene = { ...scene, layers: scene.layers.map((l) => ({ ...l, muted: true })) };
     const res = await renderScore(proj, DEFAULT_MASTER, { maxSeconds: 10 }, muted);
@@ -111,7 +119,7 @@ describe.skipIf(!HAS_WEB_AUDIO)('rendered audio quality', () => {
   }, 120_000);
 
   it('a single event voice renders structurally deterministically', async () => {
-    const proj = analyzeProject('det', 8, null, 'det');
+    const proj = populated(analyzeProject('det', 8, null, 'det'));
     const scene = proj.scenes[0];
     const layer = scene.layers[0]; // a bed voice from the cold open
     const a = await renderStem(scene, layer, DEFAULT_MASTER);
