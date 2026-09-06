@@ -146,6 +146,15 @@ function mkLayer(kind: LayerKind, rnd: () => number, space: SpaceId, tension: nu
   };
 }
 
+/**
+ * Ingest/import produces a deterministic STRUCTURAL plan — scene timing,
+ * key/tension arc, and a candidate voice-class suggestion per scene — but
+ * never audible content. `Scene.layers` starts empty on every import: no
+ * "wall of synthesized tracks" until the composer explicitly asks for one
+ * (Generate / Regen scene / Auto Sound Design / Add Layer). The candidate
+ * suggestion survives on `scene.plan` so those explicit actions have
+ * something deterministic to draw from.
+ */
 export function analyzeProject(
   name: string,
   duration: number,
@@ -188,7 +197,9 @@ export function analyzeProject(
       // async analysis (backend shot detection), never for staged theatre.
       status: 'ready',
       hits: hits.sort((a, b) => a - b),
-      layers: bank.kinds.map((k) => mkLayer(k, rnd, bank.space, tension, root)),
+      // No procedural voices on ingest — see the function-level note above.
+      layers: [],
+      plan: { kinds: bank.kinds, space: bank.space, root },
     });
   }
   return {
@@ -204,6 +215,18 @@ export function analyzeProject(
     spotting: [],
     createdAt: Date.now(),
   };
+}
+
+/**
+ * Turn a scene's deterministic plan into real, audible Layer[] — this is
+ * the explicit "Generate" / "Regen scene" action. `variant` reseeds the
+ * result (bump it to get a fresh take on the same scene); omitted, the
+ * scene id alone makes the result reproducible.
+ */
+export function generateSceneLayers(scene: Scene, variant = 0): Layer[] {
+  const plan = scene.plan ?? { kinds: SCENE_BANK[0].kinds, space: SCENE_BANK[0].space, root: ROOTS[0] };
+  const rnd = mulberry32(hashString(`${scene.id}:${variant}`));
+  return plan.kinds.map((k) => mkLayer(k, rnd, plan.space, scene.tension, plan.root));
 }
 
 export function regenerateLayer(l: Layer): Layer {

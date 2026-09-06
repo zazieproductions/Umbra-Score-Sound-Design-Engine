@@ -135,7 +135,7 @@ export default function Timeline({ studio }: { studio: Studio }) {
         <span className="chip">{project.scenes.length} scenes</span>
         <span className="chip">{project.fps} fps</span>
         {clips.length > 0 && <span className="chip">{clips.length} clips</span>}
-        {activeScene && <span className="chip hidden sm:inline-flex">{activeScene.layers[0]?.space ?? 'hall'} space</span>}
+        {activeScene && <span className="chip hidden sm:inline-flex">{activeScene.layers[0]?.space ?? activeScene.plan?.space ?? 'hall'} space</span>}
         <div className="ml-auto flex items-center gap-1.5">
           <button className={`btn px-2 py-1.5 ${snap ? 'text-ember' : ''}`} onClick={() => setSnap((s) => !s)} title="Snap to cuts & hits">
             <Magnet size={12} />

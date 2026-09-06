@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AudioClip, Layer, LayerKind, Project, RenderJob, Scene } from './types';
 import { soundClipToAudioClip } from './types';
-import { addLayer as makeLayer, analyzeProject, regenerateLayer } from './generate';
+import { addLayer as makeLayer, analyzeProject, generateSceneLayers, regenerateLayer } from './generate';
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
 import { download, renderClipStem, renderScore, renderStem } from './render';
 import { formatReport } from './quality';
@@ -322,15 +322,14 @@ export function useStudio() {
       // blocks the deterministic structural plan above; with no video file
       // (demo template) it logs that scene text is used instead.
       void analyzeProjectVideo(p);
-      const layers = p.scenes.reduce((a, s) => a + s.layers.length, 0);
       const hits = p.scenes.reduce((a, s) => a + s.hits.length, 0);
       log(`ingest: ${name} · ${duration.toFixed(1)}s · ${sourceLabel}`, 'ok');
       log(
-        `structural plan: ${p.scenes.length} scene block(s) · ${layers} procedural layer(s) · ${hits} sync point(s) — deterministic local layout`,
+        `structural plan: ${p.scenes.length} scene block(s) · ${hits} sync point(s) — deterministic local layout, no audible tracks yet`,
         'info',
       );
       log(
-        'layers are synthesised live by the Web Audio voices — turn the monitor on and play to hear the stack; bounces render the same graph offline',
+        'the timeline is silent by design — use Generate/Regen scene for procedural layers, Auto Sound Design for library retrieval, or add clips explicitly',
         'info',
       );
     },
@@ -420,6 +419,25 @@ export function useStudio() {
     clipsRef.current = project?.clips ?? [];
     timeRef.current = time;
   });
+  /*
+   * Hard engine lifecycle — the ONLY place that decides when the monitor
+   * graph must be torn down. Deliberately excludes `activeSceneId`: a scene
+   * change while playing must resync content (the next effect, via
+   * engine.start()/update() reading the fresh refs), never hard-stop and
+   * refade the whole graph. But whenever this condition actually goes
+   * false — Pause, Monitor Off, project closed, or unmount — the cleanup
+   * below calls engine.stop() so every procedural voice, scheduled clip
+   * and pending Web Audio node is silenced immediately. This is the fix
+   * for the transport bug where Pause only cancelled the rAF loop and left
+   * the audio graph running.
+   */
+  useEffect(() => {
+    if (!playing || !project || !audioOn) return;
+    return () => {
+      engine.stop();
+    };
+  }, [playing, project, audioOn]);
+
   useEffect(() => {
     if (!playing || !project || !audioOn) return;
     engine.start(activeLayersRef.current, clipsRef.current, timeRef.current);
@@ -441,28 +459,73 @@ export function useStudio() {
     } else v.pause();
   }, [playing, time]);
 
-  const seek = useCallback((t: number) => {
-    setTime(t);
-    if (videoRef.current) videoRef.current.currentTime = t;
-  }, []);
+  /**
+   * Seeking only ever moves the transport position — it must never create
+   * layers/clips, trigger analysis placement, or mutate the project (video
+   * import and drag/click on the timeline all funnel through this one
+   * function). While the monitor is live, a seek reschedules the clip
+   * graph cleanly at the new position via engine.reseek() so a clip that
+   * spans the seek target restarts in sync instead of silently drifting,
+   * and nothing left over from the old position keeps sounding. Procedural
+   * layers are untouched — they are generative beds, not timeline-anchored
+   * material, so they never need to be retriggered by a seek.
+   */
+  const seek = useCallback(
+    (t: number) => {
+      setTime(t);
+      if (videoRef.current) videoRef.current.currentTime = t;
+      if (playing && audioOn) engine.reseek(clipsRef.current, t);
+    },
+    [playing, audioOn],
+  );
 
   const setMaster = useCallback((patch: Partial<MasterParams>) => {
     setMasterState((m) => ({ ...m, ...patch }));
     engine.setMaster(patch);
   }, []);
 
+  /** Ensure/resume the AudioContext from a user gesture — shared by Play and Monitor. */
+  const ensureAudio = useCallback(async () => {
+    if (audioOn) return;
+    engine.ensure();
+    await engine.ctx!.resume();
+    setAudioOn(true);
+    log('monitor: Web Audio running @ 48 kHz', 'ok');
+  }, [audioOn, log]);
+
   const toggleAudio = useCallback(async () => {
     if (!audioOn) {
-      engine.ensure();
-      await engine.ctx!.resume();
-      setAudioOn(true);
-      log('monitor: Web Audio running @ 48 kHz', 'ok');
+      await ensureAudio();
     } else {
       engine.stop();
       setAudioOn(false);
       log('monitor: stopped', 'info');
     }
-  }, [audioOn, log]);
+  }, [audioOn, ensureAudio, log]);
+
+  /**
+   * Play must "just work" on the first press — no separate Monitor On step.
+   * It starts/resumes the AudioContext (from this very click, so the
+   * browser's autoplay gesture requirement is satisfied) and starts the
+   * transport in the same action. Monitor stays available as a status/
+   * mute control, but is never a prerequisite for sound.
+   */
+  const play = useCallback(() => {
+    void ensureAudio();
+    setPlaying(true);
+  }, [ensureAudio]);
+
+  const pause = useCallback(() => {
+    setPlaying(false);
+  }, []);
+
+  /** Play/Pause toggle for the transport button and the Space shortcut — the
+   *  single place that decides whether starting playback needs to first
+   *  turn the monitor on, so every caller gets req-2 for free. */
+  const togglePlay = useCallback(() => {
+    if (!playing) play();
+    else pause();
+  }, [playing, play, pause]);
 
   const audition = useCallback((layer: Layer) => {
     engine.audition(layer);
@@ -970,7 +1033,7 @@ export function useStudio() {
       setProject((cur) => {
         if (!cur) return cur;
         const scene = cur.scenes.find((s) => s.id === sceneId);
-        const l = makeLayer(kind, scene?.layers[0]?.space ?? 'hall', scene?.tension ?? 0.6, scene?.layers[0]?.root ?? 55);
+        const l = makeLayer(kind, scene?.plan?.space ?? scene?.layers[0]?.space ?? 'hall', scene?.tension ?? 0.6, scene?.plan?.root ?? scene?.layers[0]?.root ?? 55);
         log(`generate: new ${l.name} · ${l.model} · seed ${l.seed}`, 'gpu');
         return { ...cur, scenes: cur.scenes.map((s) => (s.id === sceneId ? { ...s, layers: [...s.layers, l] } : s)) };
       });
@@ -999,10 +1062,26 @@ export function useStudio() {
     [project, log],
   );
 
+  /**
+   * Explicit, composer-initiated procedural pass for one scene. An empty
+   * scene (the ingest default) gets its deterministic candidate stack from
+   * `scene.plan` for the first time — this is the "Generate" action, never
+   * run automatically. A scene that already has layers gets each one
+   * regenerated with a fresh seed instead, so repeated presses keep giving
+   * new takes rather than silently no-op-ing.
+   */
   const regenScene = useCallback(
     (sceneId: string) => {
       const s = project?.scenes.find((x) => x.id === sceneId);
       if (!s) return;
+      if (s.layers.length === 0) {
+        const layers = generateSceneLayers(s, Date.now());
+        setProject((cur) =>
+          cur ? { ...cur, scenes: cur.scenes.map((sc) => (sc.id === sceneId ? { ...sc, layers } : sc)) } : cur,
+        );
+        log(`generate: scene ${s.index} stack — ${layers.length} procedural layer(s) synthesised`, 'gpu');
+        return;
+      }
       log(`regen: scene ${s.index} stack — ${s.layers.length} layer(s)`, 'info');
       s.layers.forEach((l) => regenLayer(sceneId, l.id));
     },
@@ -1109,6 +1188,9 @@ export function useStudio() {
     seek,
     playing,
     setPlaying,
+    play,
+    pause,
+    togglePlay,
     master,
     setMaster,
     audioOn,
