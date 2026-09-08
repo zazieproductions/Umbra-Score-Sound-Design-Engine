@@ -57,18 +57,26 @@ explicitly opt in, and the Models view states the licence constraint on screen.
 
 ---
 
-## MMAudio — video-conditioned foley
+## MMAudio — EXPERIMENTAL · NONCOMMERCIAL
 
 | | |
 | --- | --- |
-| Role in Umbra | Foley synchronised to picture (footsteps, impacts, motion-driven sound) |
-| Code licence | **MIT** (`hkchengrex/MMAudio`) |
-| Weights | Distributed by the authors; check the repository's model card for the weight terms, which may differ from the code licence |
-| Install | `python scripts/setup_models.py --mmaudio` |
+| Role in Umbra | Selected 1–8 s of video + optional text → synchronized WAV → canonical AudioClip |
+| Code licence | **MIT** — [official project](https://github.com/hkchengrex/MMAudio) |
+| Checkpoint licence | **CC BY-NC 4.0 — noncommercial only**, per the [official model card](https://huggingface.co/hkchengrex/MMAudio/blob/main/README.md) |
+| Default / supported model | `mmaudio_small_44k.pth` (`small_44k`); never downloads a large model by default |
+| Installation | Optional `backend/requirements-mmaudio.txt`, then `python scripts/setup_models.py --mmaudio` |
+| Storage | Gitignored `checkpoints/mmaudio/` including the provider-private HF cache; no weights committed |
+| Gating | Blocked in strict/portable workflows; explicit noncommercial consent also required. Not included in `--core` or `--all`. |
+| Provenance | Model/revision/hash, seed, prompt, source video timing and code/weight licences survive clip edits and export manifests/sidecars |
+| Runtime status here | **NOT runtime-verified** — inference mocked in CI; no pretrained model run |
 
-**FoleyCrafter** (`open-mmlab/FoleyCrafter`, **Apache-2.0** code) is supported as an alternative
-video-conditioned provider. Its weights build on Stable Diffusion components; check that lineage
-before commercial use.
+Required auxiliary weights: Apple `DFN5B-CLIP-ViT-H-14-384` (upstream alias
+for `…-378`, `apple-amlr` terms) and NVIDIA `bigvgan_v2_44khz_128band_512x`
+(MIT), plus MMAudio's published VAE/Synchformer. Their terms do not remove the
+noncommercial restriction. See [the complete install/runtime runbook](docs/development/MMAUDIO.md).
+
+FoleyCrafter is not implemented as a separate provider by this integration.
 
 ---
 
@@ -110,7 +118,7 @@ Approximate on-disk footprint, so you can plan before downloading. `scripts/setu
 | --- | --- |
 | ACE-Step 1.5 (turbo + VAE + Qwen3-Embedding-0.6B + 1.7B LM) | ~8–10 GB |
 | Stable Audio Open 1.0 | ~1.5 GB |
-| MMAudio | ~2 GB |
+| MMAudio small_44k | ~0.63 GB (601 MiB) flow network; **~7.24 GB total** including required VAE, Synchformer, CLIP and vocoder |
 | CLAP | ~1 GB |
 
 ## Before you use any of these commercially
@@ -120,7 +128,8 @@ Approximate on-disk footprint, so you can plan before downloading. `scripts/setu
 2. **Check attribution requirements.** Several licences require crediting the original authors.
 3. **Check whether changes must be indicated**, and whether share-alike applies to derivatives.
 4. **Check revenue thresholds.** Stable Audio Open's community licence has one at US$1M.
-5. **Verify your specific use case.** "Available to download" is not "licensed for your
+5. **Exclude MMAudio from commercial workflows.** Its checkpoints are CC BY-NC 4.0, not commercial-safe.
+6. **Verify your specific use case.** "Available to download" is not "licensed for your
    product".
 
 Umbra is built for personal and professional sound design work, but the licence obligations
@@ -130,14 +139,14 @@ attach to *you* as the operator of the models, not to this repository.
 
 ```
 checkpoints/            # default download root, git-ignored
-  ace-step/
-  stable-audio/
-  mmaudio/
-  clap/
+  acestep-v15-turbo/   # plus the other ACE-Step main components
+  stable-audio-open-1.0/
+  mmaudio/             # weights/, ext_weights/, hf-cache/
+  clap-htsat-unfused/
 ```
 
-Override with `--dir` on `scripts/setup_models.py` or the `UMBRA_CHECKPOINT_DIR` environment
-variable. `python scripts/setup_models.py --list` reports what is present, how large it is, and
+Override with `--dir` on `scripts/setup_models.py` or the `UMBRA_CHECKPOINTS` environment
+variable (use the same path in the running backend; `--dir` affects setup only). `python scripts/setup_models.py --list` reports what is present, how large it is, and
 which devices were actually detected.
 
 ## Data handling

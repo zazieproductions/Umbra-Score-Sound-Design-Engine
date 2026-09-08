@@ -47,6 +47,7 @@ MODEL_PACKAGES = [
     ("diffusers", "Diffusers"),
     ("accelerate", "Accelerate"),
     ("acestep", "ACE-Step"),
+    ("mmaudio", "MMAudio (EXPERIMENTAL / NONCOMMERCIAL)"),
     ("stable_audio_tools", "stable-audio-tools"),
     ("laion_clap", "LAION-CLAP"),
     ("scenedetect", "PySceneDetect"),

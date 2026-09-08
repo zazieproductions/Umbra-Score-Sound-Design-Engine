@@ -12,6 +12,7 @@ Usage::
     python scripts/setup_models.py --ace-step-base # + base checkpoint (continuation)
     python scripts/setup_models.py --stable-audio  # Stable Audio Open 1.0
     python scripts/setup_models.py --clap          # CLAP semantic search
+    python scripts/setup_models.py --mmaudio       # small 44.1k; NONCOMMERCIAL only
     python scripts/setup_models.py --list          # show what is already local
 
 Licences differ per model and some are gated. See THIRD_PARTY_MODELS.md — you
@@ -28,7 +29,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from backend.services import model_manager  # noqa: E402
+from backend.services import model_manager, mmaudio_models as mma  # noqa: E402
 
 # ACE-Step 1.5 main repo + the components its own downloader expects.
 ACE_STEP_MAIN_REPO = "ACE-Step/Ace-Step1.5"
@@ -129,8 +130,39 @@ def install_simple(key: str, root: Path) -> int:
     return 0 if download(repo, target) else 1
 
 
+def install_mmaudio(root: Path) -> int:
+    """Explicit opt-in. Fetch only pinned small_44k inference files + auxiliaries."""
+    print(f"\nMMAudio — {mma.NOTICE}\nCode: MIT. Checkpoints: {mma.LICENSE}.")
+    print(f"Noncommercial use only: {mma.LICENSE_URL}")
+    print("~0.63 GB flow checkpoint; ~7.24 GB including required encoders/VAE/vocoder.")
+    print(f"Python runtime (separate): pip install -r backend/requirements-mmaudio.txt\n")
+    snapshot_download = _require_hf()
+    target = mma.model_root(root)
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot_download(
+            repo_id=mma.REPO, revision=mma.REVISION, local_dir=str(target),
+            allow_patterns=[*mma.WEIGHTS, "README.md"], token=os.environ.get("HF_TOKEN"),
+        )
+        for repo, aux in mma.AUXILIARIES.items():
+            snapshot_download(
+                repo_id=repo, revision=aux["revision"], cache_dir=str(target / "hf-cache"),
+                allow_patterns=[*aux["files"], "LICENSE", "README.md"], token=os.environ.get("HF_TOKEN"),
+            )
+            # Upstream uses revision=main. Resolve it to the pinned, offline snapshot.
+            ref = mma.cache_repo(target, repo) / "refs" / "main"
+            ref.parent.mkdir(parents=True, exist_ok=True)
+            ref.write_text(aux["revision"])
+        mma.verify_files(target)
+    except Exception as exc:
+        print(f"MMAudio setup FAILED: {exc}", file=sys.stderr)
+        return 1
+    print(f"MMAudio small_44k assets verified at {target}. Inference is NOT runtime verified.")
+    return 0
+
+
 def show_list(root: Path) -> None:
-    report = model_manager.model_report()
+    report = model_manager.model_report(root)
     print(f"\ncheckpoints root: {root}\n")
     print("CHECKPOINTS")
     if not report.checkpoints:
@@ -164,15 +196,16 @@ def main() -> int:
     )
     parser.add_argument("--stable-audio", action="store_true", help="Stable Audio Open 1.0 (gated)")
     parser.add_argument("--clap", action="store_true", help="CLAP semantic search")
-    parser.add_argument("--all", action="store_true", help="everything above")
+    parser.add_argument("--mmaudio", action="store_true", help="MMAudio small 44.1k ONLY (EXPERIMENTAL / NONCOMMERCIAL)")
+    parser.add_argument("--all", action="store_true", help="all other models; excludes MMAudio (explicit --mmaudio required)")
     parser.add_argument("--list", action="store_true", help="show local state and exit")
     parser.add_argument("--dir", type=str, default=None, help="override checkpoints directory")
     args = parser.parse_args()
 
-    root = Path(args.dir).expanduser() if args.dir else model_manager.checkpoints_root()
+    root = (Path(args.dir).expanduser() if args.dir else model_manager.checkpoints_root()).resolve()
 
     if args.list or not any(
-        [args.core, args.ace_step, args.ace_step_base, args.stable_audio, args.clap, args.all]
+        [args.core, args.ace_step, args.ace_step_base, args.stable_audio, args.clap, args.mmaudio, args.all]
     ):
         show_list(root)
         if not args.list:
@@ -188,6 +221,8 @@ def main() -> int:
         failures += install_simple("stable-audio", root)
     if args.all or args.clap:
         failures += install_simple("clap", root)
+    if args.mmaudio:
+        failures += install_mmaudio(root)
 
     print()
     show_list(root)

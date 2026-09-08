@@ -1,0 +1,8 @@
+# Optional MMAudio runtime. Not included by requirements.txt or CI.
+# Install a matching torch / torchvision / torchaudio build for your machine FIRST.
+# Official code: MIT. Released MMAudio checkpoints: CC BY-NC 4.0 (noncommercial only).
+# Weights are installed separately: python scripts/setup_models.py --mmaudio
+# Pin the upstream API audited by the isolated adapter, not a third-party fork.
+mmaudio @ git+https://github.com/hkchengrex/MMAudio.git@974010a026c731054592d8f777218bd9d85a6c24
+open_clip_torch==2.29.0
+soundfile>=0.13.1

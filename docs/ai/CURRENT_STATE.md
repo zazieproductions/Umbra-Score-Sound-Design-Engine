@@ -27,7 +27,8 @@ backend.
 
 Registry + router (5 providers), ACE-Step / Stable Audio / MMAudio / CLAP
 adapters, scene+spotting planner, video/waveform analysis, audio store
-(decode-before-register), job queue, model discovery. All routes in `app.py`.
+(decode-before-register), job queue, model discovery. Routes in `app.py` plus the external-API
+integration router (`backend/integrations/`); Freesound credentials stay server-side.
 
 ## Providers
 
@@ -36,7 +37,7 @@ adapters, scene+spotting planner, video/waveform analysis, audio store
 | umbra-procedural | 17 Web Audio voices, offline bounce to WAV | RUNTIME VERIFIED (browser-side); per-stem/per-scene renders deterministic; full-mix may vary at 1-LSB level (native engine float reduction) |
 | ace-step | Adapter + prompt plan + job flow plumbed | NOT runtime-verified here — needs weights + torch + ffmpeg on target hardware |
 | stable-audio | Validation adapter | NOT runtime-verified here |
-| mmaudio | Adapter, real-or-UNAVAILABLE | NOT runtime-verified here |
+| mmaudio | Official small_44k adapter + selected-range → existing jobs/AudioClip; explicit noncommercial gate and export provenance | **NOT runtime-verified here** — no weights/torch; heavy inference mocked |
 | clap | Embeddings/search adapter | NOT runtime-verified here |
 | library (Freesound/user/Pixabay) | Retrieval subsystem | Verified at plumbing level: 19/19 mocked acceptance tests. Freesound HTTP now runs through the backend (`backend/integrations/`), key server-side — 21 backend + 12 frontend mocked tests; **live freesound.org call NOT runtime-verified here** (outbound TLS blocked in this environment) |
 
@@ -48,17 +49,13 @@ remains open by design — CI never downloads weights.
 
 ## Test counts
 
-- Frontend: 135 (`npm test`) — 19 retrieval acceptance + 12 Freesound backend
-  integration + 6 architecture
-  invariants + 20 quality-measurement units + 6 rendered gates exercising the
-  real engine through headless Web Audio (4 audio-QA + 2 stem-delivery
-  equivalence: shared frameCount + Σ-stems-null on genuine convolvers;
-  `node-web-audio-api`, skip-not-fail when the addon cannot load) +
-  72 export-delivery (clock 6, stemPlan 27, kernel A/B/C/G 8, WAV/BWF 10,
-  manifest 6, preflight+ZIP 10, loudness/boundaries 5).
-- Backend: 87 (`pytest backend/tests -q`), no downloads (incl. 21 Freesound
-  integration tests, `httpx.MockTransport`, no network)
-- `tsc -b` clean · `eslint` clean · `vite build` clean
+- Frontend: 165 passed / 6 environment-dependent rendered tests skipped
+  (`npm run verify`); includes 12 MMAudio boundary/UI/licensing/export tests.
+- Backend: 154 passed / 2 local-fixture tests skipped, no model downloads.
+  Includes 59 MMAudio contract cases and real ffmpeg tiny-MP4 extraction/upload
+  with a temporary toolchain; inference itself is mocked. Also includes the
+  upstream Freesound integration (21 backend / 12 frontend mocked tests).
+- `tsc -b` clean · `eslint` clean · `vite build` clean (bundle-size warning).
 
 ## Audio quality gates
 
@@ -91,6 +88,17 @@ oscillators across all pitched/transient voices (no fold-back aliasing).
 - Browser cache (IndexedDB) durability is best-effort; timeline clips are the
   durable record via `clearUnusedCache` protection.
 
+## MMAudio optional integration
+
+`python scripts/setup_models.py --mmaudio` installs only small_44k + required
+auxiliaries (~7.24 GB), not large/training models; excluded from `--core`/`--all`.
+All weights/caches stay gitignored. Code MIT, checkpoints **CC BY-NC 4.0**;
+UI **EXPERIMENTAL · NONCOMMERCIAL**. Uses existing licensing policy and requires
+explicit consent; strict/portable workflows block generation/export. Real
+source timing, prompt, model/version, seed and licensing persist in AudioClip
+metadata and mandatory export manifests/sidecars. No second timeline/backend.
+[Runbook and manual verification command](../development/MMAUDIO.md).
+
 ## Open technical debt
 
 See `docs/TECH_DEBT.md` for the register (IDs, risk, safe next steps).
@@ -116,9 +124,14 @@ alignment, export loudness conformance tests, docs drift checks.
 
 ## Last verified
 
-- **Date:** 2026-09-05 · **base commit:** `0d78a15` · **branch:**
-  `arena/01a072fd-umbra-score-sound-design-engin`
-- Frontend: `npm run verify` green (typecheck + eslint + 45 pass / 4 skip) ·
-  `npm run build` green · rendered QA 49/49 with the headless engine + ALSA stub
-- Backend: `pytest backend/tests` 66 passed, no downloads
-- Runtime provider verification: none in this environment (see table above)
+- **Date:** 2026-09-07 · **base commit:** `285b012` · **branch:**
+  `arena/01a073b4-umbra-score-sound-design-engin` (rebased on fetched main).
+- Frontend: `npm run verify` green (165 pass / 6 skip) · `npm run build` green.
+- Backend: `pytest backend/tests -q` 154 passed / 2 skipped with ffmpeg toolchain;
+  without ffmpeg: 153 passed / 3 skipped. No weights downloaded.
+- Live Vite proxy/API: discovery, real tiny-MP4 upload, licensing HTTP 403,
+  missing-model HTTP 503 verified; manual verifier fails honestly (exit 1).
+- Headless browser: Models/Score screenshots show actual missing-model status
+  and noncommercial labels; successful generation/edit/playback is still untested.
+- Runtime provider verification: **none** in this environment. In particular,
+  MMAudio model loading, CUDA/MPS/CPU inference and listening sync remain unverified.

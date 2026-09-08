@@ -20,4 +20,5 @@ scenedetect[opencv]>=0.6.4
 # lightning>=2.0.0
 
 # --- MMAudio (video -> synchronized audio) ----------------------------------
-# Install from source per that project's instructions; there is no PyPI wheel.
+# Kept separate: pip install -r backend/requirements-mmaudio.txt
+# Checkpoints CC BY-NC 4.0; explicit opt-in: python scripts/setup_models.py --mmaudio

@@ -50,6 +50,9 @@ export interface ProviderStatus {
   notes: string[];
   installHint: string | null;
   error: string | null;
+  experimental?: boolean;
+  commercialSafe?: boolean | null;
+  weightsLicense?: string | null;
 }
 
 export interface DeviceInfo {
@@ -140,6 +143,11 @@ export interface GenerateRequest {
   repaintStart?: number | null;
   repaintEnd?: number | null;
   referenceStrength?: number;
+  videoPath?: string | null;
+  videoStart?: number;
+  videoEnd?: number;
+  commercialSafe?: boolean;
+  allowNoncommercial?: boolean;
   timelineStart?: number;
   sceneId?: string | null;
   label?: string | null;
@@ -187,6 +195,7 @@ export interface RouteDecision {
   reason: string;
   alternatives: ProviderId[];
   matched: string[];
+  blocked: boolean;
 }
 
 export interface StoredAudio {
@@ -206,6 +215,16 @@ export interface StoredAudio {
 }
 
 /* ------------------------------------------------------------------ client */
+
+export const MMAUDIO_NOTICE = 'EXPERIMENTAL · NONCOMMERCIAL';
+
+/** Fail closed even for callers outside the scoring panel. The server checks again. */
+export function generationLicenseError(req: Pick<GenerateRequest, 'provider' | 'commercialSafe' | 'allowNoncommercial'>): string | null {
+  if (req.provider !== 'mmaudio') return null;
+  if (req.commercialSafe !== false) return 'MMAudio is blocked in commercial-safe workflows (CC BY-NC 4.0 checkpoints).';
+  if (req.allowNoncommercial !== true) return 'Explicit noncommercial consent is required for MMAudio.';
+  return null;
+}
 
 export class BackendOfflineError extends Error {
   constructor() {
@@ -253,6 +272,8 @@ export const backend = {
   },
 
   async generate(req: GenerateRequest): Promise<GenerationJob> {
+    const error = generationLicenseError(req);
+    if (error) throw new Error(error);
     const r = await request<{ job: GenerationJob }>('/api/generate', {
       method: 'POST',
       body: JSON.stringify(req),
@@ -316,10 +337,10 @@ export const backend = {
     });
   },
 
-  async route(text: string, hasVideoSelection = false): Promise<RouteDecision> {
+  async route(text: string, hasVideoSelection = false, commercialSafe = true, allowNoncommercial = false): Promise<RouteDecision> {
     const r = await request<{ route: RouteDecision }>('/api/route', {
       method: 'POST',
-      body: JSON.stringify({ text, hasVideoSelection }),
+      body: JSON.stringify({ text, hasVideoSelection, commercialSafe, allowNoncommercial }),
     });
     return r.route;
   },
@@ -337,13 +358,18 @@ export const backend = {
   },
 
   /** Save the exact generated file to disk, untouched by the master chain. */
-  downloadAudio(audioId: string, filename: string) {
-    const a = document.createElement('a');
-    a.href = `/api/audio/${encodeURIComponent(audioId)}?download=1`;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+  downloadAudio(audioId: string, filename: string, withProvenance = false) {
+    const base = `/api/audio/${encodeURIComponent(audioId)}`;
+    const files = [{ url: `${base}?download=1`, name: filename }];
+    if (withProvenance) files.push({ url: `${base}?metadata=1`, name: `${filename}.provenance.json` });
+    for (const file of files) {
+      const a = document.createElement('a');
+      a.href = file.url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
   },
 
   async listAudio(kind?: string): Promise<StoredAudio[]> {
@@ -367,6 +393,18 @@ export const backend = {
     if (!res.ok) throw new Error(`upload failed: ${res.status}`);
     const body = await res.json();
     return body.audio as StoredAudio;
+  },
+
+  /** Upload a browser-selected video to this same local backend, only on explicit generation. */
+  async uploadVideo(blob: Blob, name: string): Promise<{ path: string; duration: number }> {
+    const form = new FormData();
+    form.append('file', blob, name);
+    const res = await fetch('/api/analysis/video/upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `video upload failed: ${res.status}`);
+    }
+    return (await res.json()).video;
   },
 
   /** Poll a job to completion. Resolves with the finished job either way. */
@@ -408,7 +446,7 @@ export const CAPABILITY_LABEL: Record<Capability, string> = {
 };
 
 /** Offline description used before the backend answers (never claims readiness). */
-export const PROVIDER_FALLBACK: Record<ProviderId, Pick<ProviderStatus, 'label' | 'blurb' | 'role'>> = {
+export const PROVIDER_FALLBACK: Record<ProviderId, Pick<ProviderStatus, 'label' | 'blurb' | 'role' | 'experimental' | 'commercialSafe' | 'weightsLicense'>> = {
   'umbra-procedural': {
     label: 'Umbra Procedural',
     blurb: 'Instant deterministic synthesis',
@@ -416,7 +454,7 @@ export const PROVIDER_FALLBACK: Record<ProviderId, Pick<ProviderStatus, 'label' 
   },
   'ace-step': { label: 'ACE-Step', blurb: 'AI scoring / music generation', role: 'musical_score' },
   'stable-audio': { label: 'Stable Audio Open', blurb: 'Text → sound design', role: 'sound_design' },
-  mmaudio: { label: 'MMAudio', blurb: 'Video → synchronized audio', role: 'video_foley' },
+  mmaudio: { label: 'MMAudio', blurb: 'Video → synchronized audio', role: 'video_foley', experimental: true, commercialSafe: false, weightsLicense: 'CC BY-NC 4.0' },
   clap: { label: 'Library Match', blurb: 'Semantic sound search', role: 'semantic' },
 };
 

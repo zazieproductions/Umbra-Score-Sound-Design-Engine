@@ -5,7 +5,7 @@ import { CLIP_PROVIDER_META } from '../lib/types';
 import { backend } from '../lib/providers';
 import { tc } from '../lib/format';
 import { Slider } from './LayerPanel';
-import { ROLE_LABELS, type SoundRole } from '../lib/library/types';
+import { ROLE_LABELS, licenseAllowed, type SoundRole } from '../lib/library/types';
 
 /**
  * Unified inspector for all clip types: generative + library.
@@ -188,9 +188,11 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
         </div>
       )}
 
+      {clip.provider === 'mmaudio' && <p className="text-[10px] text-tan">EXPERIMENTAL · NONCOMMERCIAL — CC BY-NC 4.0 checkpoints. Generate new takes from a video range in Score; no repaint/continuation.</p>}
+
       {/* actions */}
       <div className="flex flex-wrap gap-1.5 border-t border-white/[0.06] pt-2.5">
-        {!isLibrary && (
+        {!isLibrary && clip.provider !== 'mmaudio' && (
           <>
             <button className="btn px-2 py-1.5" disabled={!!busy || studio.generation.backendState !== 'online'} onClick={() => void run('regen', () => studio.regenerateClip(clip))} title="Re-run these settings with a new seed">
               {busy === 'regen' ? <Loader size={11} className="animate-spin" /> : <RotateCw size={11} />} Regenerate
@@ -210,7 +212,7 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
           <Download size={11} /> Stem
         </button>
         {!isLibrary && (
-          <button className="btn px-2 py-1.5" onClick={() => backend.downloadAudio(clip.audioId, `${clip.name}.wav`)} title="Download the exact generated file">
+          <button className="btn px-2 py-1.5" disabled={clip.provider === 'mmaudio' && !licenseAllowed(studio.libSettings.licensePolicy, 'CC_BY_NC')} onClick={() => backend.downloadAudio(clip.audioId, `${clip.name}.wav`, clip.provider === 'mmaudio')} title="Download the exact generated file (MMAudio includes a provenance JSON sidecar)">
             <Download size={11} /> Source
           </button>
         )}
@@ -219,7 +221,7 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
         </button>
       </div>
 
-      {range && !isLibrary && (
+      {range && !isLibrary && clip.provider !== 'mmaudio' && (
         <input value={repaintPrompt} onChange={(e) => setRepaintPrompt(e.target.value)} placeholder="optional new direction for the repainted span" className="w-full rounded-lg border border-white/[0.09] bg-white/[0.03] px-2.5 py-1.5 text-[10.5px] text-bone outline-none placeholder:text-dim focus:border-ember/40" />
       )}
 
@@ -242,6 +244,11 @@ export default function ClipInspector({ studio }: { studio: Studio }) {
             [
               ['provider', m.provider],
               ['model', m.model],
+              ['model version', m.modelVersion],
+              ['code revision', m.codeRevision],
+              ['checkpoint license', m.license],
+              ['source video start', m.sourceVideoStart],
+              ['generated duration', m.generatedDuration],
               ['seed', m.seed],
               ['bpm', m.bpm],
               ['key', m.key && m.mode ? `${m.key} ${m.mode}` : m.key],

@@ -15,6 +15,7 @@ so and generation fails loudly instead of returning synthetic filler.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -86,6 +87,9 @@ class ProviderStatus:
     notes: List[str] = field(default_factory=list)
     install_hint: Optional[str] = None
     error: Optional[str] = None
+    experimental: bool = False
+    commercial_safe: Optional[bool] = None  # None means unclassified, not safe
+    weights_license: Optional[str] = None
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -105,6 +109,9 @@ class ProviderStatus:
             "notes": self.notes,
             "installHint": self.install_hint,
             "error": self.error,
+            "experimental": self.experimental,
+            "commercialSafe": self.commercial_safe,
+            "weightsLicense": self.weights_license,
         }
 
 
@@ -134,6 +141,15 @@ class GenerationRequest:
     repaint_end: Optional[float] = None
     reference_strength: float = 0.35
 
+    # Local video conditioning. Source range is authoritative for MMAudio timing.
+    video_path: Optional[str] = None
+    video_start: Optional[float] = None
+    video_end: Optional[float] = None
+
+    # Fail-closed licensing: opting out of safe mode alone is NOT consent.
+    commercial_safe: bool = True
+    allow_noncommercial: bool = False
+
     # Timeline context — never sent to a model, carried into clip metadata
     timeline_start: float = 0.0
     scene_id: Optional[str] = None
@@ -154,6 +170,24 @@ class GenerationRequest:
                         return None
             return None
 
+        def video_num(key: str, alias: str) -> Optional[float]:
+            value = data.get(key, data.get(alias))
+            if value is None:
+                return None
+            try:
+                result = float(value)
+                if isinstance(value, bool) or not math.isfinite(result):
+                    raise ValueError
+                return result
+            except (TypeError, ValueError):
+                raise ProviderError(f"{key} must be a finite number of seconds", http_status=400)
+
+        def flag(key: str, alias: str, default: bool) -> bool:
+            value = data.get(key, data.get(alias, default))
+            if not isinstance(value, bool):
+                raise ProviderError(f"{key} must be a JSON boolean", http_status=400)
+            return value
+
         task_raw = str(data.get("task") or "generate").lower()
         try:
             task = TaskType(task_raw)
@@ -173,13 +207,30 @@ class GenerationRequest:
             bpm_val = None
 
         ts = data.get("timeSignature", data.get("time_signature"))
+        provider = str(data.get("provider") or "ace-step")
+        duration = num("duration")
+        advanced = data.get("advanced") or {}
+        if not isinstance(advanced, dict):
+            raise ProviderError("advanced must be a JSON object", http_status=400)
+        if provider == "mmaudio":
+            # Do not turn malformed seeds into an unrequested random generation.
+            if seed is not None and seed != "":
+                try:
+                    if isinstance(seed, bool) or seed_val is None or float(seed) != seed_val:
+                        raise ValueError
+                except (TypeError, ValueError, OverflowError):
+                    raise ProviderError("MMAudio seed must be an integer", http_status=400)
+            if "duration" in data and (isinstance(data["duration"], bool) or duration is None):
+                raise ProviderError("duration must be a finite number of seconds", http_status=400)
+            if task_raw != "generate":
+                raise ProviderError("MMAudio supports only the generate task", http_status=400)
 
         return cls(
-            provider=str(data.get("provider") or "ace-step"),
+            provider=provider,
             prompt=str(data.get("prompt") or ""),
             negative_prompt=str(data.get("negativePrompt") or data.get("negative_prompt") or ""),
             task=task,
-            duration=float(num("duration") or 12.0),
+            duration=duration if duration is not None else 12.0,
             seed=seed_val,
             key=(data.get("key") or None),
             mode=(data.get("mode") or None),
@@ -192,10 +243,15 @@ class GenerationRequest:
             repaint_start=num("repaintStart", "repaint_start"),
             repaint_end=num("repaintEnd", "repaint_end"),
             reference_strength=float(num("referenceStrength", "reference_strength") or 0.35),
+            video_path=data.get("videoPath") or data.get("video_path"),
+            video_start=video_num("videoStart", "video_start"),
+            video_end=video_num("videoEnd", "video_end"),
+            commercial_safe=flag("commercialSafe", "commercial_safe", True),
+            allow_noncommercial=flag("allowNoncommercial", "allow_noncommercial", False),
             timeline_start=float(num("timelineStart", "timeline_start") or 0.0),
             scene_id=data.get("sceneId") or data.get("scene_id"),
             label=data.get("label"),
-            advanced=dict(data.get("advanced") or {}),
+            advanced=dict(advanced),
         )
 
     def key_scale(self) -> Optional[str]:
@@ -277,6 +333,10 @@ class AudioProvider:
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:  # pragma: no cover - abstract
         raise NotImplementedError
+
+    def validate_request(self, request: GenerationRequest) -> GenerationRequest:
+        """Validate/normalize before queueing; providers also call this for direct use."""
+        return request
 
     # Optional lifecycle hooks -------------------------------------------------
     async def warmup(self) -> None:

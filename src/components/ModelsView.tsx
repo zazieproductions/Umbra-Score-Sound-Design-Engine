@@ -17,6 +17,7 @@ import {
 import type { Studio } from '../lib/useStudio';
 import {
   CAPABILITY_LABEL,
+  MMAUDIO_NOTICE,
   backend,
   type ModelsReport,
   type ProviderId,
@@ -84,6 +85,7 @@ function ProviderCard({ p, verified }: { p: ProviderStatus; verified: boolean })
             <StateBadge p={p} verified={verified} />
           </div>
           <p className="mt-0.5 text-[10.5px] leading-relaxed text-dim">{p.blurb}</p>
+          {p.id === 'mmaudio' && <p className="mt-1 text-[9.5px] font-semibold text-tan">{MMAUDIO_NOTICE} · CC BY-NC 4.0 checkpoints</p>}
           <p className="mt-0.5 text-[9.5px] leading-relaxed text-dim/80" title={v.detail}>{v.detail}</p>
         </div>
       </div>
@@ -299,6 +301,8 @@ export default function ModelsView({ studio }: { studio: Studio }) {
           <Cmd>python scripts/setup_models.py --list</Cmd>
           <Cmd>python scripts/setup_models.py --core</Cmd>
           <Cmd>python scripts/setup_models.py --ace-step</Cmd>
+          <Cmd>python scripts/setup_models.py --mmaudio</Cmd>
+          <p className="text-[10px] text-tan">MMAudio is optional / noncommercial only (~7.24 GB including required auxiliary weights). Install its runtime with pip install -r backend/requirements-mmaudio.txt.</p>
         </div>
       </div>
     </div>

@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from backend.providers.base import AudioProvider, ProviderRole, ProviderStatus
 from backend.providers.ace_step import AceStepProvider
 from backend.providers.clap import ClapProvider
-from backend.providers.mmaudio import MMAudioProvider
+from backend.providers.mmaudio import MMAudioProvider, license_error
 from backend.providers.stable_audio import StableAudioProvider
 from backend.providers.umbra_procedural import UmbraProceduralProvider
 
@@ -77,6 +77,7 @@ class RouteDecision:
     reason: str
     alternatives: List[str] = field(default_factory=list)
     matched: List[str] = field(default_factory=list)
+    blocked: bool = False
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -85,6 +86,7 @@ class RouteDecision:
             "reason": self.reason,
             "alternatives": self.alternatives,
             "matched": self.matched,
+            "blocked": self.blocked,
         }
 
 
@@ -148,6 +150,8 @@ def route_intent(
     *,
     has_video_selection: bool = False,
     available: Optional[List[str]] = None,
+    commercial_safe: bool = True,
+    allow_noncommercial: bool = False,
 ) -> RouteDecision:
     """Pick the right engine for a natural-language request.
 
@@ -191,7 +195,11 @@ def route_intent(
     total = sum(max(0.0, s) for s in scores.values()) or 1.0
     confidence = best_score / total
 
+    blocked_reason = license_error(commercial_safe, allow_noncommercial)
+    blocked = best == "mmaudio" and blocked_reason is not None
     reason = f"Reads as {_ROLE_BLURB[best]}."
+    if blocked:
+        reason += f" {blocked_reason} No substitute has been selected or generated."
     if available is not None and best not in available:
         reason += f" {best} is not installed right now, so this request cannot be fulfilled by it."
 
@@ -199,7 +207,8 @@ def route_intent(
         provider=best,
         confidence=confidence,
         reason=reason,
-        alternatives=[p for p, s in ranked[1:3] if s > 0],
+        alternatives=[p for p, s in ranked[1:3] if s > 0 and not (p == "mmaudio" and blocked_reason)],
+        blocked=blocked,
         matched=matched[best][:5],
     )
 

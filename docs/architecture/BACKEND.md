@@ -15,7 +15,7 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | `providers/registry.py` | Provider discovery, honest status aggregation, and `route_intent` — a transparent keyword/geometry scorer that explains *why* a request routes somewhere. | Inference |
 | `providers/ace_step.py` | ACE-Step 1.5 musical scoring (server or local mode, task allow-listing per checkpoint family). | Foley, SFX, search |
 | `providers/stable_audio.py` | Stable Audio Open: physical/environmental sound. Validates repo, pipeline, sample rate, device, seed, duration. | Music |
-| `providers/mmaudio.py` | MMAudio: video-conditioned Foley. Real inference or `UNAVAILABLE` — never a stub result. | Anything non-video |
+| `providers/mmaudio.py` + `mmaudio_runtime.py` | Optional official small_44k: validate noncommercial consent/range, extract video, one-shot offline inference child, register real WAV. Uses the existing job queue; no separate service. | Commercial-safe use, downloads during inference, non-video generation |
 | `providers/clap.py` | CLAP embeddings + semantic search. Advertises `SEMANTIC_SEARCH`/`EMBEDDINGS` **only** — generation capabilities are forbidden (pinned by tests). | Audio generation |
 | `providers/umbra_procedural.py` | Descriptor only: tells the registry/Models view that procedural rendering happens in the browser. The Python service never renders it. | Rendering |
 | `analysis/scenes.py` | Real cut detection (PySceneDetect when installed, else `available:false`) + deterministic horror-scoring planner. | Inference |
@@ -26,9 +26,10 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | `services/audio_store.py` | Content-addressed audio store. **Enforces the real-result contract**: nothing registers without being decoded first, so duration/rate/channels are measured, never claimed. | Inference |
 | `services/device.py` | Real device detection (CUDA/MPS/CPU via actual probes). Returns `None` when unknown — the UI shows nothing rather than a plausible number. | Anything else |
 | `services/generation_jobs.py` | Async job queue with cancellation. `succeeded` is reachable only with decoded audio on disk. | Routing |
+| `services/mmaudio_models.py` | Small_44k pinned asset allowlist, private cache paths, checksums and model/licence provenance shared by setup/discovery/inference. | Inference, a second model registry |
 | `services/model_manager.py` | Checkpoint discovery (size on disk), package probing, Models-view report. Only reports what exists. | Downloads (see `scripts/setup_models.py`) |
 | `integrations/` | External, credential-bearing APIs. Owns the Freesound client, the status/probe logic and the routes; the credential never leaves this package. | Anything secret-free |
-| `tests/` | 87 tests: real-audio contract, capability honesty, payload mapping, routing, Freesound integration (mocked). No model downloads, no network. | — |
+| `tests/` | Contract tests: real-audio validation, capability honesty, payload mapping, routing, MMAudio range/licensing, Freesound integration (mocked). No model downloads, no network. | — |
 
 ## API map (`app.py`)
 
@@ -38,7 +39,7 @@ preprocessing. Run with `python scripts/run_backend.py` (or
 | Planning | `POST /api/plan/scene`, `POST /api/plan/project`, `POST /api/prompt/build`, `GET /api/prompt/presets`, `POST /api/route` |
 | Generation | `POST /api/generate` → `GET /api/jobs[/{id}]` → `POST /api/jobs/{id}/cancel` |
 | Audio | `GET /api/audio[/{id}]`, `DELETE /api/audio/{id}`, `POST /api/audio/upload`, `GET /api/audio/{id}/peaks`, `GET /api/audio/{id}/features` |
-| Search / analysis | `POST /api/search` (CLAP, local files only), `POST /api/analysis/cuts`, `POST /api/analysis/video`, `GET /api/analysis/toolchain` |
+| Search / analysis | `POST /api/search` (CLAP, local files only), `POST /api/analysis/cuts`, `POST /api/analysis/video`, `POST /api/analysis/video/upload` (local streamed video), `GET /api/analysis/toolchain` |
 | Integrations (Freesound) | `GET /api/integrations/freesound/status`, `POST /api/integrations/freesound/search`, `GET /api/integrations/freesound/sounds/{id}[/similar|/analysis|/preview|/download]` — see `../development/FREESOUND.md` |
 
 The Freesound routes live in `integrations/router.py` and are the **only** way
@@ -61,3 +62,17 @@ never returned, logged, or forwarded: responses carry `configured` /
 6. **A credential belongs in `integrations/`, never in a response.** Read it
    from the environment, use it there, and report only whether the integration
    is configured and connected. Never log or echo a secret value.
+
+## Optional MMAudio boundary
+
+`AudioProvider.validate_request` runs before queueing and inside MMAudio for
+direct calls. Video in/out (or in + duration) normalizes `timeline_start` to
+the source in-point; lengths outside 1–8 s are refused, not clamped. Requests
+default to commercial-safe / no noncommercial consent. The router can explain
+a picture-locked match but marks it `blocked: true` when licensing forbids it.
+
+The private inference child calls official MMAudio APIs with the small model,
+explicit local paths, an offline HF cache, and existing device detection;
+its WAV still must pass the existing AudioStore contract. Raw audio metadata
+is downloadable at `GET /api/audio/{id}?metadata=1`. Full install, licences,
+limits, and honest verification status: [MMAUDIO.md](../development/MMAUDIO.md).

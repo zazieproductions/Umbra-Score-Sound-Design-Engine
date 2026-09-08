@@ -19,16 +19,11 @@ import {
   type RuntimeSummary,
 } from './providers';
 import { engine } from './audio';
-import { makeClip } from './clips';
+import { clipFromGeneration } from './clips';
 import { renderProceduralClip } from './proceduralClip';
-import type { AudioClip, ClipProvider } from './types';
+import type { AudioClip } from './types';
 
 export type BackendState = 'checking' | 'online' | 'offline' | 'error';
-
-function toClipProvider(id: ProviderId): ClipProvider {
-  if (id === 'ace-step' || id === 'stable-audio' || id === 'mmaudio' || id === 'umbra-procedural') return id;
-  return 'library';
-}
 
 /** Providers rendered by the backend (Umbra Procedural stays in-browser). */
 const REMOTE_PROVIDERS: ProviderId[] = ['ace-step', 'stable-audio', 'mmaudio', 'clap'];
@@ -154,20 +149,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
         }
 
         const r = finished.result;
-        const clip = makeClip({
-          audioId: r.audioId,
-          url: r.url,
-          provider: toClipProvider(finished.provider),
-          name: placement.name,
-          start: placement.start,
-          duration: r.duration,
-          sampleRate: r.sampleRate,
-          channels: r.channels,
-          metadata: {
-            ...(r.metadata as AudioClip['metadata']),
-            provider: toClipProvider(finished.provider),
-          },
-        });
+        const clip = clipFromGeneration(finished, placement);
 
         // Decode before it reaches the timeline so playback is instant and any
         // decode failure surfaces here rather than as silence during playback.
@@ -182,7 +164,7 @@ export function useGeneration({ onClip, log }: GenerationOptions) {
         markVerified(finished.provider);
         log(
           `${finished.provider}: ${r.duration.toFixed(2)}s @ ${r.sampleRate} Hz · ` +
-            `${(r.bytes / 1024).toFixed(0)} KB → timeline @ ${placement.start.toFixed(2)}s`,
+            `${(r.bytes / 1024).toFixed(0)} KB → timeline @ ${clip.start.toFixed(2)}s`,
           'ok',
         );
       } catch (e) {

@@ -48,6 +48,8 @@ __pycache__/
 
 # Model weights — never committed. Fetch with scripts/setup_models.py
 checkpoints/
+# Include MMAudio auxiliary .bin caches even under setup --dir overrides
+mmaudio/
 models/
 *.safetensors
 *.ckpt

@@ -12,6 +12,7 @@
 
 import { biquad, dbToGain, gainNode, type MasterChain } from './dsp';
 import type { AudioClip, ClipProvider } from './types';
+import type { GenerationJob } from './providers';
 
 /* ------------------------------------------------------------ decode cache */
 
@@ -347,6 +348,23 @@ export function makeClip(init: ClipInit): AudioClip {
     createdAt: Date.now(),
     version: 1,
   };
+}
+
+/** The single backend-result → canonical AudioClip boundary, also exercised in CI. */
+export function clipFromGeneration(job: GenerationJob, placement: { start: number; name: string }): AudioClip {
+  if (job.state !== 'succeeded' || !job.result) throw new Error('Generation has no successful audio result');
+  const r = job.result;
+  const provider: ClipProvider = job.provider === 'clap' ? 'library' : job.provider;
+  // The normalized backend video in-point wins over stale UI/playhead placement.
+  const start = provider === 'mmaudio' ? job.timelineStart : placement.start;
+  if (!Number.isFinite(start) || start < 0 || !r.audioId || !r.url || !Number.isFinite(r.duration) || r.duration <= 0) {
+    throw new Error('Generation returned invalid audio/timing');
+  }
+  return makeClip({
+    audioId: r.audioId, url: r.url, provider, name: placement.name, start,
+    duration: r.duration, sampleRate: r.sampleRate, channels: r.channels,
+    metadata: { ...(r.metadata as AudioClip['metadata']), provider },
+  });
 }
 
 export function clipEnd(c: AudioClip): number {

@@ -12,7 +12,7 @@ where each one runs.
 | `umbra-procedural` | Precise synthetic elements: subs, drones, risers, stingers, impacts (17 classes) | Browser Web Audio — always available | `src/lib/voices.ts`, `backend/providers/umbra_procedural.py` (descriptor only) |
 | `ace-step` | Musical score: tonal beds, orchestral/synthetic texture, continuation, repaint | Local Python (PyTorch) | `backend/providers/ace_step.py` |
 | `stable-audio` | Physical/environmental sound: machinery, room tone, water, wind, debris | Local Python (Diffusers) | `backend/providers/stable_audio.py` |
-| `mmaudio` | Video-conditioned Foley synchronised to picture | Local Python | `backend/providers/mmaudio.py` |
+| `mmaudio` | Selected video → synchronized Foley · **EXPERIMENTAL · NONCOMMERCIAL**, CC BY-NC 4.0 checkpoints | Local Python, optional small_44k | `backend/providers/mmaudio.py` |
 | `clap` | Semantic search over your own library (embeddings, **not generation**) | Local Python | `backend/providers/clap.py` |
 | Library retrieval (`library` / `user` clip providers) | Freesound, user library, Pixabay-assisted discovery — ranked, license-gated, provenance-kept | Browser ranking + IndexedDB cache; Freesound HTTP goes through the local backend because its API key is server-side (+ CLAP rerank when installed) | `src/lib/library/`, `backend/integrations/` |
 
@@ -24,7 +24,9 @@ the `/api/route` endpoint — a transparent scorer that returns its reasoning.
 - ACE-Step scores. It does not author Foley, footsteps, door sounds, or room
   tone, and never generates a whole soundtrack unattended.
 - Stable Audio handles recorded-world texture, not musical score.
-- MMAudio handles picture-locked Foley, nothing else.
+- MMAudio handles 1–8 s picture selections + optional text, nothing else. It is
+  blocked in commercial-safe workflows and requires explicit noncommercial
+  consent; never an automatic fallback. See [MMAUDIO.md](../development/MMAUDIO.md).
 - CLAP finds sounds; it never synthesises them.
 - Retrieval owns Foley; generation owns music beds.
 
