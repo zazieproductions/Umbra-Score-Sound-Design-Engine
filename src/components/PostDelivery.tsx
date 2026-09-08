@@ -13,6 +13,7 @@ import {
   type TailPolicy,
 } from '../lib/export';
 import { provenanceStore } from '../lib/library/cache';
+import { licenseAllowed } from '../lib/library/types';
 import { bytes } from '../lib/format';
 
 /* ==================================================================== *
@@ -59,6 +60,7 @@ export function PostDeliveryPanel({ studio }: { studio: Studio }) {
         studio.master,
         {
           preset,
+          commercialSafe: !licenseAllowed(studio.libSettings.licensePolicy, 'CC_BY_NC'),
           tail,
           sampleRate,
           bitDepth,

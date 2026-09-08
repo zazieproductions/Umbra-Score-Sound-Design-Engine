@@ -22,8 +22,10 @@ frontend code.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -216,6 +218,8 @@ async def route(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         payload.get("text") or "",
         has_video_selection=bool(payload.get("hasVideoSelection")),
         available=available,
+        commercial_safe=payload.get("commercialSafe", True) is not False,
+        allow_noncommercial=payload.get("allowNoncommercial") is True,
     )
     return {"route": decision.to_json(), "available": available}
 
@@ -226,11 +230,18 @@ async def route(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 @app.post("/api/generate")
 async def generate(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Queue a generation job. Returns immediately with a job id."""
-    request = GenerationRequest.from_json(payload)
+    try:
+        request = GenerationRequest.from_json(payload)
+    except ProviderError as exc:
+        return _err(exc)
     provider = app.state.registry.get(request.provider)
     if provider is None:
         raise HTTPException(status_code=404, detail=f"unknown provider '{request.provider}'")
 
+    try:
+        request = provider.validate_request(request)
+    except ProviderError as exc:
+        return _err(exc)
     status = provider.status()
     if not status.ready:
         return JSONResponse(
@@ -274,11 +285,15 @@ async def cancel_job(job_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/audio/{audio_id}")
-async def get_audio(audio_id: str):
+async def get_audio(audio_id: str, metadata: bool = Query(False)):
     """Serve real audio bytes. This is what the timeline decodes and plays."""
     rec = app.state.store.get(audio_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="audio not found")
+    if metadata:
+        return JSONResponse(rec.to_json(), headers={
+            "Content-Disposition": f'attachment; filename="umbra_{rec.id}.provenance.json"',
+        })
     path = Path(rec.path)
     if not path.exists():
         raise HTTPException(status_code=410, detail="audio file no longer on disk")
@@ -354,6 +369,40 @@ async def analysis_cuts(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         min_scene_seconds=float(payload.get("minSceneSeconds", 1.5)),
     )
     return result.to_json()
+
+
+@app.post("/api/analysis/video/upload")
+async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Keep browser-selected video local; inference later extracts only its range.
+
+    No browser filesystem path is guessed. Uploads are streamed to ignored
+    runtime storage, capped at 2 GiB, and rejected if ffprobe finds no video.
+    """
+    suffix = Path(file.filename or "video.mp4").suffix.lower()
+    if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+        raise HTTPException(status_code=400, detail="Choose an MP4, MOV, M4V, WebM or MKV video.")
+    if not toolchain_status()["ffprobe"]["available"]:
+        raise HTTPException(status_code=503, detail="Install ffmpeg/ffprobe before uploading video.")
+    root = app.state.store.root.parent / "video"
+    root.mkdir(parents=True, exist_ok=True)
+    path = (root / f"{uuid.uuid4().hex}{suffix}").resolve()
+    try:
+        size = 0
+        with path.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 2 * 1024**3:
+                    raise HTTPException(status_code=413, detail="Video upload exceeds 2 GiB; use a smaller local reel or videoPath via the API.")
+                out.write(chunk)
+        info = await asyncio.to_thread(probe_video, path)
+        if not info.available or not info.video_codec or info.duration <= 0:
+            raise HTTPException(status_code=400, detail=info.message or "Upload has no readable video stream.")
+        return {"video": {**info.to_json(), "name": file.filename}}
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
 
 
 @app.post("/api/analysis/video")

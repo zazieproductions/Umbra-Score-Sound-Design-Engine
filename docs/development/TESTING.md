@@ -7,7 +7,7 @@ Three tiers. Know which tier you ran, and what it does and does not prove.
 ```bash
 npm run verify                        # typecheck + lint + frontend unit tests
 npm run build                         # production build (also runs tsc)
-python -m pytest backend/tests -q     # backend: 57 tests, zero model downloads
+python -m pytest backend/tests -q     # backend: zero model downloads
 ```
 
 | Suite | Proves | Does NOT prove |
@@ -39,6 +39,17 @@ move/trim → master contains it (see `tests/ACCEPTANCE-REPORT.md` for the
 retrieval tiers). Passing Tier 3 for a provider is the **only** way it earns
 `RUNTIME VERIFIED`, recorded in `docs/ai/CURRENT_STATE.md` with date, commit,
 and machine. CI never runs Tier 3 and never downloads weights.
+
+### MMAudio (manual, noncommercial only)
+
+`python scripts/verify_mmaudio.py --video fixtures/runtime/mmaudio_tiny.mp4 --start 0.4 --duration 2 --seed 42 --allow-noncommercial`
+
+Uses the existing backend API/jobs/audio store, never downloads weights, and
+only prints `RUNTIME VERIFIED` after real generation + downloaded WAV decode.
+[Fixture creation, setup and UI follow-through](MMAUDIO.md). Contract tests in
+`backend/tests/test_mmaudio.py` and `tests/mmaudio.test.ts` mock heavy inference
+and rendering; even their real ffmpeg range-extraction test is not model
+runtime verification. No MMAudio inference has been verified in this environment.
 
 ## Tier 3 (delivery) — stem package DAW round trip (manual, opt-in)
 

@@ -33,12 +33,19 @@ python3 -m venv .venv
 
 ```bash
 python scripts/setup_models.py --list          # what's installed, what devices exist
-python scripts/setup_models.py --core          # ACE-Step + CLAP
+python scripts/setup_models.py --core          # ACE-Step core
 python scripts/setup_models.py --ace-step
 python scripts/setup_models.py --stable-audio  # gated: needs HF_TOKEN + licence acceptance
+python scripts/setup_models.py --mmaudio       # optional small 44.1k, NONCOMMERCIAL only
 ```
 
-Weights land in `checkpoints/` (git-ignored). `ffmpeg` is an optional
+MMAudio additionally needs `pip install -r backend/requirements-mmaudio.txt`
+(after a matching PyTorch/torchvision/torchaudio install) and ffmpeg/ffprobe.
+MIT code, **CC BY-NC 4.0 checkpoints**: not commercial-safe. The small network
+is ~601 MiB; full required weights ~7.24 GB. It is excluded from `--core` and
+`--all`. [Range workflow, exact paths and real-runtime test](MMAUDIO.md).
+
+Weights land in the repository's `checkpoints/` (git-ignored, independent of cwd). `ffmpeg` is an optional
 external binary (not a pip package) enabling video metadata/thumbnails.
 
 ## Configuration

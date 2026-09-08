@@ -16,6 +16,7 @@ import {
 import type { Studio } from '../lib/useStudio';
 import {
   CAPABILITY_LABEL,
+  MMAUDIO_NOTICE,
   MUSICAL_KEYS,
   TIME_SIGNATURES,
   backend,
@@ -24,6 +25,7 @@ import {
   type ProviderStatus,
 } from '../lib/providers';
 import { tc } from '../lib/format';
+import { licenseAllowed } from '../lib/library/types';
 import { Slider } from './LayerPanel';
 
 const PROVIDER_ICON: Record<ProviderId, typeof Waves> = {
@@ -44,10 +46,12 @@ function GeneratorPicker({
   providers,
   value,
   onChange,
+  commercialSafe,
 }: {
   providers: ProviderStatus[];
   value: ProviderId;
   onChange: (id: ProviderId) => void;
+  commercialSafe: boolean;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -59,8 +63,8 @@ function GeneratorPicker({
           <button
             key={p.id}
             onClick={() => onChange(p.id)}
-            disabled={!p.ready}
-            title={p.ready ? p.blurb : p.notes[0] ?? 'not available'}
+            disabled={!p.ready || (p.id === 'mmaudio' && commercialSafe)}
+            title={p.id === 'mmaudio' && commercialSafe ? 'Blocked by strict/portable licensing policy' : p.ready ? p.blurb : p.notes[0] ?? 'not available'}
             className={`flex items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
               on
                 ? 'border-ember/50 bg-blood/15'
@@ -80,6 +84,7 @@ function GeneratorPicker({
                 )}
               </span>
               <span className="block truncate text-[10px] text-dim">{p.blurb}</span>
+              {p.id === 'mmaudio' && <span className="mt-1 block text-[9px] font-semibold text-tan">{MMAUDIO_NOTICE}</span>}
               {!p.ready && p.installHint && (
                 <span className="tnum mt-0.5 block truncate text-[9px] text-tan/80">{p.installHint}</span>
               )}
@@ -113,6 +118,9 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
   const [preview, setPreview] = useState<{ prompt: string; negativePrompt: string; notes: string[] } | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [routeHint, setRouteHint] = useState<string | null>(null);
+  const [mmaudioConsent, setMmaudioConsent] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const commercialSafe = !licenseAllowed(studio.libSettings.licensePolicy, 'CC_BY_NC');
 
   const readyProviders = generation.providers;
 
@@ -120,9 +128,10 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
   const resolved = useMemo<ProviderId>(() => {
     const wanted = readyProviders.find((p) => p.id === provider);
     if (wanted?.ready) return provider;
-    return readyProviders.find((p) => p.ready)?.id ?? provider;
+    return readyProviders.find((p) => p.ready && p.id !== 'mmaudio')?.id ?? provider;
   }, [readyProviders, provider]);
 
+  const isMmaudio = resolved === 'mmaudio';
   const active = generation.providerById(resolved);
   const caps = useMemo(() => active?.capabilities ?? [], [active]);
   const has = useCallback((c: Capability) => caps.includes(c), [caps]);
@@ -135,9 +144,9 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
    * An explicit in/out range on the timeline *is* the duration — the composer
    * should not have to type it twice.
    */
-  const duration = range
-    ? Math.max(1, Math.round((range.end - range.start) * 10) / 10)
-    : durationInput;
+  const duration = isMmaudio
+    ? (range ? range.end - range.start : 8)
+    : range ? Math.max(1, Math.round((range.end - range.start) * 10) / 10) : durationInput;
   const setDuration = setDurationInput;
 
   const target = useMemo(() => {
@@ -150,6 +159,10 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
 
   /* Prompt preview — the composer always sees what is actually sent. */
   const refreshPreview = useCallback(async () => {
+    if (isMmaudio) {
+      setPreview({ prompt, negativePrompt: negative, notes: [] });
+      return;
+    }
     if (generation.backendState !== 'online') return;
     try {
       const plan = await backend.buildPrompt({
@@ -165,7 +178,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
     } catch {
       setPreview(null);
     }
-  }, [prompt, key, mode, bpm, timeSig, duration, negative, generation.backendState]);
+  }, [prompt, key, mode, bpm, timeSig, duration, negative, generation.backendState, isMmaudio]);
 
   useEffect(() => {
     const t = window.setTimeout(() => void refreshPreview(), 400);
@@ -180,38 +193,47 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
     }
     const t = window.setTimeout(async () => {
       try {
-        const d = await backend.route(prompt, !!project?.videoUrl);
+        const d = await backend.route(prompt, !!range && !!(project?.videoUrl || project?.videoPath), commercialSafe, mmaudioConsent);
         setRouteHint(d.provider !== resolved && d.confidence > 0.35 ? d.reason : null);
       } catch {
         setRouteHint(null);
       }
     }, 600);
     return () => window.clearTimeout(t);
-  }, [prompt, resolved, project?.videoUrl, generation.backendState]);
+  }, [prompt, resolved, project?.videoUrl, project?.videoPath, range, commercialSafe, mmaudioConsent, generation.backendState]);
 
   const submit = async () => {
-    const plan = preview;
-    await studio.generateClip({
-      provider: resolved,
-      prompt: plan?.prompt || prompt,
-      negativePrompt: plan?.negativePrompt,
-      duration,
-      seed: seedLocked ? seed : null,
-      key: has('KEY_CONDITIONING') ? key : null,
-      mode: has('KEY_CONDITIONING') ? mode : null,
-      bpm: has('BPM_CONDITIONING') ? bpm : null,
-      timeSignature: has('TIME_SIGNATURE_CONDITIONING') ? timeSig : null,
-      timelineStart: start,
-      sceneId: activeScene?.id ?? null,
-      label: prompt.slice(0, 34) || 'Generated cue',
-      referenceStrength: coverStrength,
-      advanced: advanced
-        ? { inferenceSteps: steps, guidanceScale: guidance, coverStrength }
-        : {},
-    });
+    const plan = isMmaudio ? null : preview;
+    setSubmitting(true);
+    try {
+      await studio.generateClip({
+        provider: resolved,
+        prompt: plan?.prompt || prompt,
+        negativePrompt: isMmaudio ? negative : plan?.negativePrompt,
+        duration,
+        seed: seedLocked ? seed : null,
+        key: has('KEY_CONDITIONING') ? key : null,
+        mode: has('KEY_CONDITIONING') ? mode : null,
+        bpm: has('BPM_CONDITIONING') ? bpm : null,
+        timeSignature: has('TIME_SIGNATURE_CONDITIONING') ? timeSig : null,
+        timelineStart: start,
+        ...(isMmaudio ? { videoStart: range!.start, videoEnd: range!.end, allowNoncommercial: mmaudioConsent } : {}),
+        sceneId: activeScene?.id ?? null,
+        label: prompt.slice(0, 34) || (isMmaudio ? 'MMAudio video Foley' : 'Generated cue'),
+        referenceStrength: coverStrength,
+        advanced: advanced
+          ? { inferenceSteps: steps, guidanceScale: guidance, coverStrength }
+          : {},
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const disabled = !active?.ready || !prompt.trim() || !project;
+  const disabled = !active?.ready || !project || submitting || generation.busy ||
+    (isMmaudio
+      ? commercialSafe || !mmaudioConsent || !(project.videoUrl || project.videoPath) || !range || duration < 1 || duration > 8
+      : !prompt.trim());
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -231,7 +253,24 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
         </div>
       )}
 
-      <GeneratorPicker providers={readyProviders} value={resolved} onChange={setProvider} />
+      <GeneratorPicker providers={readyProviders} value={resolved} commercialSafe={commercialSafe} onChange={(id) => {
+        setProvider(id);
+        setMmaudioConsent(false);
+        setSteps(id === 'mmaudio' ? 25 : 8);
+        setGuidance(id === 'mmaudio' ? 4.5 : 7);
+        if (id === 'mmaudio') { setPrompt(''); setPreview(null); }
+      }} />
+      {commercialSafe && <p className="text-[9.5px] text-tan">Strict/portable licensing: MMAudio is blocked. Noncommercial use must be enabled in Library Licensing settings.</p>}
+      {isMmaudio && (
+        <div className="rounded-lg border border-tan/30 bg-tan/[0.06] p-2.5 text-[10px] leading-relaxed text-tan">
+          <strong>{MMAUDIO_NOTICE}</strong>
+          <p>MIT code does not cover the checkpoints: CC BY-NC 4.0, noncommercial use only. Select 1–8 seconds by shift-dragging the timeline ruler. Only this range is analyzed; the source video is copied to your local backend once.</p>
+          <label className="mt-2 flex items-start gap-2">
+            <input type="checkbox" checked={mmaudioConsent} disabled={commercialSafe} onChange={(e) => setMmaudioConsent(e.target.checked)} />
+            I understand and will use this generation only for noncommercial purposes.
+          </label>
+        </div>
+      )}
 
       {active?.ready && (
         <div className="rounded-lg border border-white/[0.07] bg-black/25 p-2.5">
@@ -277,8 +316,8 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
       {/* ----------------------------------------------------------- prompt */}
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <span className="eyebrow">Prompt</span>
-          {presets.length > 0 && (
+          <span className="eyebrow">{isMmaudio ? 'Description (optional)' : 'Prompt'}</span>
+          {!isMmaudio && presets.length > 0 && (
             <select
               className="ml-auto rounded border border-white/[0.09] bg-white/[0.03] px-1.5 py-0.5 text-[9.5px] text-ash outline-none"
               value=""
@@ -300,7 +339,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={3}
-          placeholder="slow dissonant string texture in D minor, no percussion"
+          placeholder={isMmaudio ? 'Leave empty to condition on video alone, or describe the sound…' : 'slow dissonant string texture in D minor, no percussion'}
           className="w-full resize-none rounded-lg border border-white/[0.09] bg-white/[0.03] px-2.5 py-2 text-[11px] leading-relaxed text-bone outline-none placeholder:text-dim focus:border-ember/40"
         />
         {routeHint && (
@@ -326,7 +365,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
 
       {/* ------------------------------------------------------ conditioning */}
       <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
-        <Slider
+        {!isMmaudio && <Slider
           label="Duration"
           value={duration}
           min={2}
@@ -334,7 +373,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
           step={0.5}
           fmt={(v) => `${v.toFixed(1)}s`}
           onChange={setDuration}
-        />
+        />}
         {has('BPM_CONDITIONING') && (
           <Slider label="BPM" value={bpm} min={30} max={140} step={1} fmt={(v) => String(v)} onChange={setBpm} />
         )}
@@ -462,8 +501,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
               />
             )}
             <p className="text-[9.5px] leading-relaxed text-dim">
-              Turbo checkpoints ignore guidance scale; 8 steps is the recommended default. These controls are sent to the
-              model only when it is selected and ready.
+              {isMmaudio ? 'MMAudio small_44k defaults: 25 Euler steps, guidance 4.5. CPU/MPS use float32.' : 'Turbo checkpoints ignore guidance scale; 8 steps is the recommended default. These controls are sent to the selected model.'}
             </p>
           </div>
         )}
@@ -502,7 +540,7 @@ export default function ScoringPanel({ studio }: { studio: Studio }) {
       )}
 
       <button className="btn btn-primary w-full py-2" disabled={disabled} onClick={() => void submit()}>
-        {generation.busy ? <Loader size={13} className="animate-spin" /> : <Wand2 size={13} />}
+        {generation.busy || submitting ? <Loader size={13} className="animate-spin" /> : <Wand2 size={13} />}
         Generate {duration.toFixed(1)}s cue
       </button>
 

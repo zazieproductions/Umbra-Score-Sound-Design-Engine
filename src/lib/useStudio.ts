@@ -18,7 +18,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AudioClip, Layer, LayerKind, Project, RenderJob, Scene } from './types';
-import { soundClipToAudioClip } from './types';
+import { hasNoncommercialModel, soundClipToAudioClip } from './types';
+import { clipFields } from './export/manifest';
 import { addLayer as makeLayer, analyzeProject, generateSceneLayers, regenerateLayer } from './generate';
 import { engine, DEFAULT_MASTER, type MasterParams } from './audio';
 import { download, renderClipStem, renderScore, renderStem } from './render';
@@ -26,14 +27,14 @@ import { formatReport } from './quality';
 import { clipEnd, moveClip, splitClip, trimClip } from './clips';
 import { discardLatestSavedProject, hydrateClips, loadLatestSnapshot, persistProject } from './persistence';
 import { useGeneration } from './useGeneration';
-import type { GenerateRequest } from './providers';
+import { backend, generationLicenseError, type GenerateRequest } from './providers';
 // Library imports — preserve PR7 retrieval completely
 import { RetrievalService, type AutoPlacementDetail } from './library/service';
 import { soundCache, provenanceStore, purgeLegacyFreesoundCredentials, settingsStore, shortId } from './library/cache';
 import { exportCreditsJson, exportCreditsTxt, downloadText } from './library/credits';
 import { analyzeVideoUrl, condenseEvents, type EventEnvironment } from './library/videoAnalysis';
 import type { SoundClip, RetrievalState, SoundRole, SpottingEvent, RankedCandidate, RetrievalIntent, FreesoundConnection, LibrarySettings, AutoMode, LicenseMode, LicenseClass, LibraryAsset, SoundEventCandidate, SoundEventAnalysis, AutoPlacementReport } from './library/types';
-import { EMPTY_FREESOUND_CONNECTION, DEFAULT_LIBRARY_SETTINGS } from './library/types';
+import { EMPTY_FREESOUND_CONNECTION, DEFAULT_LIBRARY_SETTINGS, licenseAllowed } from './library/types';
 import { tc } from './format';
 
 export interface LogLine {
@@ -911,12 +912,34 @@ export function useStudio() {
   const generateClip = useCallback(
     async (req: Omit<GenerateRequest, 'timelineStart'> & { timelineStart?: number }) => {
       const start = req.timelineStart ?? range?.start ?? time;
-      return generation.generate(
-        { ...req, timelineStart: start, sceneId: req.sceneId ?? activeSceneId },
-        { start, name: req.label ?? 'Generated cue' },
-      );
+      const request: GenerateRequest = {
+        ...req, timelineStart: start, sceneId: req.sceneId ?? activeSceneId,
+        // Reuse the existing policy, not a second commercial-workflow switch.
+        commercialSafe: !licenseAllowed(libSettings.licensePolicy, 'CC_BY_NC'),
+      };
+      const error = generationLicenseError(request);
+      if (error) { log(error, 'warn'); return null; }
+      try {
+        if (req.provider === 'mmaudio') {
+          request.videoPath = req.videoPath ?? project?.videoPath;
+          if (!request.videoPath) {
+            if (!project?.videoUrl) throw new Error('Load a local source video before using MMAudio.');
+            if (!generation.providerById('mmaudio')?.ready) throw new Error('MMAudio is not installed/ready; no video uploaded.');
+            log('MMAudio: copying source video to the local backend (no cloud upload)…', 'info');
+            const response = await fetch(project.videoUrl);
+            if (!response.ok) throw new Error('Could not read the loaded source video.');
+            const video = await backend.uploadVideo(await response.blob(), project.name);
+            request.videoPath = video.path;
+            setProject((cur) => cur?.id === project.id ? { ...cur, videoPath: video.path } : cur);
+          }
+        }
+        return generation.generate(request, { start, name: req.label ?? 'Generated cue' });
+      } catch (e) {
+        log(`generation: ${(e as Error).message}`, 'warn');
+        return null;
+      }
     },
-    [generation, range, time, activeSceneId],
+    [generation, range, time, activeSceneId, project, libSettings.licensePolicy, log],
   );
 
   const continueClip = useCallback(
@@ -978,6 +1001,10 @@ export function useStudio() {
 
   const regenerateClip = useCallback(
     async (clip: AudioClip) => {
+      if (clip.provider === 'mmaudio') {
+        log('MMAudio: select the source video range in Score and explicitly consent to noncommercial generation for a new take.', 'warn');
+        return null;
+      }
       const m = clip.metadata;
       const settings = (m.generationSettings ?? {}) as Record<string, unknown>;
       return generation.generate(
@@ -998,7 +1025,7 @@ export function useStudio() {
         { start: clip.start, name: `${clip.name} v${clip.version + 1}` },
       );
     },
-    [generation, activeSceneId],
+    [generation, activeSceneId, log],
   );
 
   /* ------------------------------------------------ edits (layers) -- */
@@ -1101,6 +1128,13 @@ export function useStudio() {
       opts?: { scene?: Scene; layer?: Layer; clip?: AudioClip; filename?: string; maxSeconds?: number },
     ) => {
       if (!project) return;
+      const renderClips = opts?.clip ? [opts.clip] : opts?.layer ? [] : project.clips.filter((c) =>
+        !c.muted && (!opts?.scene || (c.start < opts.scene.end && c.start + c.duration > opts.scene.start)));
+      const restricted = renderClips.some(hasNoncommercialModel);
+      if (restricted && !licenseAllowed(libSettings.licensePolicy, 'CC_BY_NC')) {
+        log('Export blocked: MMAudio / noncommercial model clips are not permitted by strict/portable licensing.', 'warn');
+        return;
+      }
       const id = `J${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
       const job: RenderJob = {
         id,
@@ -1141,6 +1175,11 @@ export function useStudio() {
           bytes: result.bytes,
           url: result.url,
           filename,
+          provenance: restricted ? {
+            format: 'umbra-render-provenance/1', project: project.name, filename,
+            notice: 'EXPERIMENTAL · NONCOMMERCIAL — preserve checkpoint licenses and model provenance.',
+            clips: renderClips.map(clipFields),
+          } : undefined,
           peak: result.peakDb,
           lufs: result.lufs,
           quality,
@@ -1163,16 +1202,21 @@ export function useStudio() {
         log(`render failed: ${(e as Error).message}`, 'warn');
       }
     },
-    [project, master, log],
+    [project, master, log, libSettings.licensePolicy],
   );
 
   const downloadJob = useCallback(
     (job: RenderJob) => {
       if (!job.url || !job.filename) return;
+      if (job.provenance && !licenseAllowed(libSettings.licensePolicy, 'CC_BY_NC')) {
+        log('This bounce contains noncommercial model audio; download is blocked by the current licensing policy.', 'warn');
+        return;
+      }
       download(job.url, job.filename);
+      if (job.provenance) downloadText(`${job.filename}.provenance.json`, JSON.stringify(job.provenance, null, 2), 'application/json');
       log(`download: ${job.filename}`, 'info');
     },
-    [log],
+    [log, libSettings.licensePolicy],
   );
 
   const readyCount = project ? project.scenes.filter((s) => s.status === 'ready').length : 0;

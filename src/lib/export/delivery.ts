@@ -8,7 +8,7 @@
  *  explicitly opts into 'force'.
  * ==================================================================== */
 
-import type { AudioClip, Project } from '../types';
+import { hasNoncommercialModel, type AudioClip, type Project } from '../types';
 import type { MasterParams } from '../dsp';
 import type { ProvenanceEntry } from '../library/types';
 import { exportCreditsJson, exportCreditsTxt } from '../library/credits';
@@ -47,6 +47,8 @@ export type PostExportPreset =
   | 'FULL_PROJECT';
 
 export interface PostExportOptions {
+  /** Existing licensing policy: strict/portable is safe. Omitted means safe. */
+  commercialSafe?: boolean;
   preset: PostExportPreset;
   /** defaults per preset: full film unless SELECTED_RANGE */
   scope?: DeliveryScope;
@@ -241,7 +243,9 @@ export async function runPostExport(
       if (!c) return 'missing';
       return probe(c, clock);
     },
-  }, { bitDepth });
+  }, { bitDepth, commercialSafe: opts.commercialSafe });
+  // Force can override decode errors, never a commercial-use license restriction.
+  if (preflight.checks.some((c) => c.code === 'noncommercial-model' && c.level === 'error')) throw new DeliveryPreflightError(preflight);
   if (!preflight.ok && !opts.force) throw new DeliveryPreflightError(preflight);
   if (!preflight.ok && opts.force) hooks.log?.('delivery: preflight errors present — FORCED export; failures recorded in the manifest', 'warn');
 
@@ -354,7 +358,7 @@ export async function runPostExport(
     },
   ];
 
-  if (opts.docs !== false && preset.docs) {
+  if ((opts.docs !== false && preset.docs) || plan.audibleClips.some(hasNoncommercialModel)) {
     for (const t of textFiles) {
       files.push({ path: t.path, name: t.name, kind: t.kind, bytes: new TextEncoder().encode(t.text), size: 0 });
       files[files.length - 1].size = files[files.length - 1].bytes.length;

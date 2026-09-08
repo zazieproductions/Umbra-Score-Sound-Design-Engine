@@ -78,6 +78,12 @@ python scripts/setup_models.py --list
 python scripts/setup_models.py --core
 ```
 
+Optional MMAudio (MIT code, **CC BY-NC 4.0 checkpoints**, not commercial-safe):
+`pip install -r backend/requirements-mmaudio.txt`, then
+`python scripts/setup_models.py --mmaudio`. Small 44.1k only; ~0.63 GB for the
+flow checkpoint, ~7.24 GB with required auxiliaries. **Inference is not yet
+runtime-verified here.** [Installation, range workflow and manual test](docs/development/MMAUDIO.md).
+
 Setup details, troubleshooting: [`docs/development/SETUP.md`](docs/development/SETUP.md).
 
 ## Providers
@@ -87,7 +93,7 @@ Setup details, troubleshooting: [`docs/development/SETUP.md`](docs/development/S
 | **Umbra Procedural** | 17 synthesis classes — subs, drones, risers, stingers, impacts. Deterministic, instant | Browser (always available) |
 | **ACE-Step 1.5** | Musical score: tonal beds, texture, continuation, repaint | Local Python |
 | **Stable Audio Open** | Physical/environmental sound | Local Python |
-| **MMAudio** | Foley synchronised to picture | Local Python |
+| **MMAudio** | Selected video → Foley · **EXPERIMENTAL · NONCOMMERCIAL** (CC BY-NC 4.0 checkpoints) | Local Python, optional small_44k |
 | **CLAP** | Semantic search over *your* library (embeddings, not generation) | Local Python |
 | **Library retrieval** | Freesound + user library, ranked, license-gated, provenance-kept | Browser ranking + IndexedDB cache · Freesound HTTP via the local backend (API key is server-side) |
 
@@ -102,7 +108,7 @@ Routing boundaries, capability honesty, and the status ladder
 | Procedural engine, timeline, unified clips, mix + offline render | ✅ working |
 | Library retrieval (ranking, license/provenance, credits) | ✅ 25/25 frontend tests (mocked HTTP) |
 | Freesound integration (server-side key) | ✅ 12 frontend + 21 backend tests (mocked); live API call not reachable from this environment |
-| Backend registry, audio store, jobs, analysis | ✅ 62 backend tests, no downloads |
+| Backend registry, audio store, jobs, analysis | ✅ lightweight contract tests, no model downloads (counts in current-state briefing) |
 | ACE-Step / Stable Audio / MMAudio / CLAP inference | ✅ plumbed — `RUNTIME VERIFIED` only on a machine with weights + deps (not yet in this environment) |
 
 Live status briefing: [`docs/ai/CURRENT_STATE.md`](docs/ai/CURRENT_STATE.md).

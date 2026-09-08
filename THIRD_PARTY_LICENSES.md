@@ -20,10 +20,19 @@ or from source by the user; JavaScript packages come from npm via `package.json`
 | --- | --- | --- | --- |
 | **ACE-Step 1.5** | Primary trained musical-scoring provider (text→music, continuation, repaint, cover/reference) | **MIT** — "Copyright (c) 2026 ACEStep" | <https://github.com/ace-step/ACE-Step-1.5> |
 | **stable-audio-tools** | Reference implementation used to load Stable Audio Open for SFX/environmental generation | **MIT** | <https://github.com/Stability-AI/stable-audio-tools> |
-| **MMAudio** | Video-conditioned foley generation | **MIT** | <https://github.com/hkchengrex/MMAudio> |
+| **MMAudio** | Optional video-conditioned Foley; code only, **checkpoints are CC BY-NC 4.0** | **MIT** | <https://github.com/hkchengrex/MMAudio> |
 | **FoleyCrafter** | Alternative video-conditioned foley generation | **Apache-2.0** | <https://github.com/open-mmlab/FoleyCrafter> |
 | **CLAP (LAION)** | Contrastive language–audio embeddings for library search | **CC0-1.0** (code) | <https://github.com/LAION-AI/CLAP> |
 | **PySceneDetect** | Shot-boundary detection for spotting | **BSD-3-Clause** | <https://github.com/Breakthrough/PySceneDetect> |
+
+### MMAudio checkpoint restriction
+
+MMAudio's MIT source licence (Copyright © 2024 Sony Research Inc.) does **not**
+cover its released checkpoints, which are **CC BY-NC 4.0, noncommercial only**.
+The adapter is labeled EXPERIMENTAL · NONCOMMERCIAL, is not commercial-safe,
+and preserves this provenance in exports. See [THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md)
+and [the MMAudio runbook](docs/development/MMAUDIO.md). The official package
+includes third-party notices for its own dependencies; retain those on redistribution.
 
 ### ACE-Step responsible-use notice
 

@@ -12,6 +12,7 @@
  *  clip cache (delivery.ts).
  * ==================================================================== */
 
+import { hasNoncommercialModel } from '../types';
 import { DELIVERY_BIT_DEPTHS, DELIVERY_SAMPLE_RATES } from './clock';
 import { CREATIVE_BUSES, SOURCE_BUSES, type DeliveryPlan } from './stemPlan';
 
@@ -52,6 +53,7 @@ export interface PreflightReport {
 
 /** format is validated by the caller (delivery.ts) — the report checks the plan's contract. */
 export interface PreflightFormat {
+  commercialSafe?: boolean;
   bitDepth?: 16 | 24;
 }
 
@@ -136,6 +138,11 @@ export async function runPreflight(plan: DeliveryPlan, env: PreflightEnv, format
     }
   }
   if (external > 0) add(unknown ? 'warn' : 'ok', 'provenance', unknown ? `provenance for ${external - unknown}/${external} external assets — ${unknown} with unknown license metadata` : `provenance available for ${external} external assets`, unknown ? unknownIds : undefined);
+
+  const restricted = plan.audibleClips.filter(hasNoncommercialModel);
+  if (restricted.length) add(format.commercialSafe !== false ? 'error' : 'warn', 'noncommercial-model',
+    'EXPERIMENTAL · NONCOMMERCIAL: MMAudio / restricted model audio is not commercial-safe. Checkpoint license and model provenance must accompany delivery.',
+    restricted.map((c) => c.name));
 
   /* stem partition integrity — the architectural invariant, checked live */
   const creativePasses = plan.passes.filter((p) => p.mode === 'creative');

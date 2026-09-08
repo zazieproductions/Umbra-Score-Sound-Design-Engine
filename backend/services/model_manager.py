@@ -32,7 +32,7 @@ def checkpoints_root() -> Path:
         v = os.environ.get(env)
         if v:
             return Path(v).expanduser()
-    return Path.cwd() / "checkpoints"
+    return Path(__file__).resolve().parents[2] / "checkpoints"
 
 
 def package_version(name: str) -> Optional[str]:
@@ -131,17 +131,18 @@ class PackageInfo:
 class ModelReport:
     checkpoints: List[CheckpointInfo] = field(default_factory=list)
     packages: List[PackageInfo] = field(default_factory=list)
+    root: Optional[Path] = None
 
     def to_json(self) -> Dict[str, Any]:
         return {
-            "checkpointsRoot": str(checkpoints_root()),
+            "checkpointsRoot": str(self.root or checkpoints_root()),
             "checkpoints": [c.to_json() for c in self.checkpoints],
             "packages": [p.to_json() for p in self.packages],
         }
 
 
-def ace_step_checkpoints() -> List[CheckpointInfo]:
-    root = checkpoints_root()
+def ace_step_checkpoints(root: Optional[Path] = None) -> List[CheckpointInfo]:
+    root = root if root is not None else checkpoints_root()
     out: List[CheckpointInfo] = []
     for name in ACE_STEP_MAIN_COMPONENTS:
         p = root / name
@@ -205,6 +206,7 @@ def _tracked_packages() -> List[tuple]:
         ("scipy", "Resampling and analysis"),
         ("numpy", "Array maths"),
         ("acestep", "ACE-Step 1.5 inference package"),
+        ("mmaudio", "Experimental NONCOMMERCIAL video-to-audio (optional)"),
         ("peft", "LoRA / personalization (optional)"),
         ("scenedetect", "PySceneDetect cut detection (optional)"),
     ]
@@ -225,5 +227,22 @@ def package_report() -> List[PackageInfo]:
     return out
 
 
-def model_report() -> ModelReport:
-    return ModelReport(checkpoints=ace_step_checkpoints(), packages=package_report())
+def mmaudio_checkpoints(root: Optional[Path] = None) -> List[CheckpointInfo]:
+    from backend.services import mmaudio_models as mma
+
+    local = mma.model_root(root)
+    return [CheckpointInfo(
+        name="mmaudio/small_44k (NONCOMMERCIAL)",
+        present=not mma.missing_files(local),
+        path=str(local) if local.is_dir() else None,
+        # Count each required file once (HF snapshots symlink to cache blobs).
+        size_bytes=sum(p.stat().st_size for p in mma.required_files(local) if p.is_file()) or None,
+        repo=mma.REPO,
+    )]
+
+
+def model_report(root: Optional[Path] = None) -> ModelReport:
+    return ModelReport(
+        checkpoints=ace_step_checkpoints(root) + mmaudio_checkpoints(root),
+        packages=package_report(), root=root,
+    )

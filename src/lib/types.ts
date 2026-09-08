@@ -124,6 +124,23 @@ export interface ClipMetadata {
   task?: string;
   referenceAudioId?: string | null;
   sourceAudioId?: string | null;
+  /** Local video-to-audio provenance: source time never changes when a clip is moved. */
+  videoPath?: string;
+  sourceVideoStart?: number;
+  sourceVideoEnd?: number;
+  generatedDuration?: number;
+  modelVersion?: string;
+  modelRevision?: string;
+  codeVersion?: string;
+  codeRevision?: string | null;
+  codeLicense?: string;
+  license?: string;
+  licenseClass?: import('./library/types').LicenseClass;
+  licenseUrl?: string;
+  commercialSafe?: boolean;
+  experimental?: boolean;
+  creditLine?: string;
+  sourceUrl?: string;
   /** full conditioning package actually sent to the model */
   generationSettings?: Record<string, unknown>;
   inferenceSeconds?: number;
@@ -213,10 +230,15 @@ export const CLIP_PROVIDER_META: Record<ClipProvider, { label: string; color: st
   'umbra-procedural': { label: 'Umbra Procedural', color: '#ff3b5c', short: 'PROC' },
   'ace-step': { label: 'ACE-Step', color: '#7fb6e0', short: 'ACE' },
   'stable-audio': { label: 'Stable Audio', color: '#4b8f9a', short: 'SAO' },
-  mmaudio: { label: 'MMAudio', color: '#b9a37e', short: 'MMA' },
+  mmaudio: { label: 'MMAudio · EXPERIMENTAL · NONCOMMERCIAL', color: '#b9a37e', short: 'MMA' },
   library: { label: 'Library', color: '#a86bd6', short: 'LIB' },
   user: { label: 'User audio', color: '#c0a3e6', short: 'USR' },
 };
+
+/** Provider identity is authoritative even if an older clip lost license metadata. */
+export function hasNoncommercialModel(clip: Pick<AudioClip, 'provider' | 'metadata'>): boolean {
+  return clip.provider === 'mmaudio' || clip.metadata?.commercialSafe === false;
+}
 
 // Keep a deprecated alias so existing imports of SoundClip continue to type-check
 // but code should migrate to AudioClip. The library tests import SoundClip from
@@ -231,6 +253,8 @@ export interface Project {
   fps: number;
   resolution: string;
   videoUrl: string | null;
+  /** Optional local backend copy, uploaded only when video generation is requested. */
+  videoPath?: string;
   scenes: Scene[];
   /** unified timeline clips: generative + retrieved + imported share one model */
   clips: AudioClip[];
@@ -256,6 +280,8 @@ export interface RenderJob {
   filename?: string;
   peak?: number;
   lufs?: number;
+  /** Captured at bounce time; downloaded alongside WAV when restricted models are used. */
+  provenance?: Record<string, unknown>;
   /** measured quality verdict of the finished master (see src/lib/quality.ts) */
   quality?: { verdict: 'pass' | 'warn' | 'fail'; summary: string };
 }

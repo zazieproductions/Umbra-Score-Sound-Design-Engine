@@ -19,7 +19,7 @@
 import { timecode } from './clock';
 import type { DeliveryPlan, StemPassPlan } from './stemPlan';
 import { CREATIVE_BUSES, SOURCE_BUSES } from './stemPlan';
-import type { AudioClip } from '../types';
+import { hasNoncommercialModel, type AudioClip } from '../types';
 import type { ProvenanceEntry } from '../library/types';
 
 export interface PassStats {
@@ -35,7 +35,7 @@ export interface DeliveryFormatInfo {
   channels: 2;
 }
 
-function clipFields(c: AudioClip) {
+export function clipFields(c: AudioClip) {
   return {
     clipId: c.id,
     name: c.name,
@@ -50,11 +50,12 @@ function clipFields(c: AudioClip) {
     pan: c.pan,
     muted: !!c.muted,
     sourceId: c.asset?.soundId ?? c.audioId ?? null,
-    license: c.asset?.license ?? null,
-    licenseClass: c.asset?.licenseClass ?? null,
+    license: c.asset?.license ?? c.metadata.license ?? (c.provider === 'mmaudio' ? 'CC BY-NC 4.0' : null),
+    licenseClass: c.asset?.licenseClass ?? c.metadata.licenseClass ?? (c.provider === 'mmaudio' ? 'CC_BY_NC' : null),
+    commercialSafe: hasNoncommercialModel(c) ? false : c.metadata.commercialSafe ?? null,
     creator: c.asset?.creator ?? null,
-    creditLine: c.asset?.creditLine ?? null,
-    sourceUrl: c.asset?.sourceUrl ?? null,
+    creditLine: c.asset?.creditLine ?? c.metadata.creditLine ?? null,
+    sourceUrl: c.asset?.sourceUrl ?? c.metadata.sourceUrl ?? null,
     match: c.match ?? null,
     intentId: c.intentId ?? null,
     metadata: c.metadata ?? null,
@@ -210,6 +211,7 @@ export function buildCueRows(plan: DeliveryPlan): CueRow[] {
       const startRel = (p?.startSampleAbs ?? Math.round(c.start * sr)) - plan.span.startSample;
       const endRel = (p?.endSampleAbs ?? Math.round((c.start + c.duration) * sr)) - plan.span.startSample;
       const notes: string[] = [];
+      if (hasNoncommercialModel(c)) notes.push('EXPERIMENTAL · NONCOMMERCIAL; checkpoint license — see delivery manifest');
       if (c.intentId) notes.push('auto-placed');
       if (typeof c.match === 'number') notes.push(`confidence ${c.match.toFixed(2)}`);
       if (c.variantIndex) notes.push(`v${c.variantIndex + 1}`);
@@ -227,7 +229,7 @@ export function buildCueRows(plan: DeliveryPlan): CueRow[] {
         source: srcTag,
         provider: c.asset?.providerLabel ?? c.provider,
         sourceId: c.asset?.soundId ?? c.audioId,
-        license: c.asset?.license ?? 'unknown',
+        license: clipFields(c).license ?? 'unknown',
         creator: c.asset?.creator ?? '—',
         notes: notes.join('; ') || (c.role ? 'placed' : 'manual'),
         startSample: startRel,
@@ -304,6 +306,13 @@ export function buildReadme(plan: DeliveryPlan, fmt: DeliveryFormatInfo): string
     `Tail policy    : ${plan.tail.kind}${plan.tail.kind !== 'exact' ? ` + ${(plan.tail as { seconds: number }).seconds} s` : ''}`,
     `Solo policy    : ${plan.soloPolicy === 'honor' ? 'HONORED — soloed clips only!' : 'ignored (mutes still honored)'}`,
     '',
+    ...(plan.audibleClips.some(hasNoncommercialModel) ? [
+      'NONCOMMERCIAL MODEL NOTICE',
+      '  MMAudio uses CC BY-NC 4.0 checkpoints (MIT code is a separate license).',
+      '  Do not use this delivery commercially. Preserve the model/author/seed/source',
+      '  provenance and license URLs in delivery_manifest.json when sharing.',
+      '',
+    ] : []),
     'HOW TO USE',
     '  1. Create a session at the exact sample rate above.',
     '  2. Drag every file from Mix/ + Post_Stems/ (or Source_Stems/) to 00:00.',
