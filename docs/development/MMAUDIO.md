@@ -213,6 +213,19 @@ Run lightweight tests with `python -m pytest backend/tests/test_mmaudio.py -q`
 and `npm test -- tests/mmaudio.test.ts`. ffmpeg-only tests skip when missing;
 CI never downloads weights or runs model inference.
 
+### Pre-PR recheck (2026-09-07)
+
+Rebased on main `285b012`, retaining the newer transport fixes and server-side
+Freesound integration. Typecheck/lint/build pass; frontend 165 passed / 6
+skipped; backend 154 passed / 2 skipped with ffmpeg (153 / 3 without).
+The live API checks and the expected missing-install verifier failure were
+repeated. **Model inference remains NOT runtime-verified.**
+
+Actual browser captures: [Models card](images/mmaudio-provider.png) and
+[Score picker](images/mmaudio-score.png). These show the real **not installed**
+state, noncommercial labels and unavailable generator; no ready status or
+successful model generation was simulated for the screenshots.
+
 ## Upgrade / remove
 
 Provider logic lives in `providers/mmaudio.py` + its private

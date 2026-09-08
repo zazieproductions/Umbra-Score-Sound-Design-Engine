@@ -124,12 +124,14 @@ alignment, export loudness conformance tests, docs drift checks.
 
 ## Last verified
 
-- **Date:** 2026-09-05 · **base commit:** `2cb7055` · **branch:**
+- **Date:** 2026-09-07 · **base commit:** `285b012` · **branch:**
   `arena/01a073b4-umbra-score-sound-design-engin` (rebased on fetched main).
 - Frontend: `npm run verify` green (165 pass / 6 skip) · `npm run build` green.
 - Backend: `pytest backend/tests -q` 154 passed / 2 skipped with ffmpeg toolchain;
   without ffmpeg: 153 passed / 3 skipped. No weights downloaded.
 - Live Vite proxy/API: discovery, real tiny-MP4 upload, licensing HTTP 403,
   missing-model HTTP 503 verified; manual verifier fails honestly (exit 1).
+- Headless browser: Models/Score screenshots show actual missing-model status
+  and noncommercial labels; successful generation/edit/playback is still untested.
 - Runtime provider verification: **none** in this environment. In particular,
   MMAudio model loading, CUDA/MPS/CPU inference and listening sync remain unverified.
